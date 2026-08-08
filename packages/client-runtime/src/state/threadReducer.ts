@@ -54,6 +54,15 @@ function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity
 }
 
 /**
+ * Rate limit activities are superseded by newer rate limit updates for the same
+ * turn. Consumers only read the latest value (walking the array backwards), so
+ * retaining history grows the thread unnecessarily.
+ */
+function isRateLimitActivity(activity: OrchestrationThreadActivity): boolean {
+  return activity.kind === "account.rate-limits.updated";
+}
+
+/**
  * Apply a single orchestration event to an `OrchestrationThread`, returning
  * the updated thread, a deletion signal, or an "unchanged" marker when the
  * event doesn't affect this thread.
@@ -571,6 +580,9 @@ export function applyThreadDetailEvent(
       // thread.reverted that discards turns can still resolve a value from
       // the turns that survive.
       const supersedesContextWindow = isResolvableContextWindowActivity(activity);
+      // Rate limit activities are also deduplicated per turn: only the latest
+      // rate limit update matters for display purposes.
+      const supersedesRateLimit = isRateLimitActivity(activity);
       const activities = pipe(
         thread.activities,
         Arr.filter(
@@ -580,6 +592,11 @@ export function applyThreadDetailEvent(
               supersedesContextWindow &&
               entry.turnId === activity.turnId &&
               isResolvableContextWindowActivity(entry)
+            ) &&
+            !(
+              supersedesRateLimit &&
+              entry.turnId === activity.turnId &&
+              isRateLimitActivity(entry)
             ),
         ),
         Arr.append(activity),

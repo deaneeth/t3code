@@ -75,9 +75,15 @@ import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
+  BUILT_IN_SLASH_COMMAND_BY_NAME,
+  BUILT_IN_SLASH_COMMAND_DEFS,
   collapseExpandedComposerCursor,
+  parseSlashSnoozeDuration,
   parseStandaloneComposerSlashCommand,
+  type StandaloneComposerSlashCommand,
 } from "../composer-logic";
+import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
+import { useThreadActions } from "../hooks/useThreadActions";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -1216,6 +1222,16 @@ function ChatViewContent(props: ChatViewProps) {
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const {
+    archiveThread: archiveThreadAction,
+    unarchiveThread: unarchiveThreadAction,
+    settleThread: settleThreadAction,
+    unsettleThread: unsettleThreadAction,
+    snoozeThread: snoozeThreadAction,
+    unsnoozeThread: unsnoozeThreadAction,
+    pinThread: pinThreadAction,
+    unpinThread: unpinThreadAction,
+  } = useThreadActions();
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
@@ -3202,6 +3218,428 @@ function ChatViewContent(props: ChatViewProps) {
   const toggleInteractionMode = useCallback(() => {
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
+  const executeStandaloneSlashCommand = useCallback(
+    async (input: StandaloneComposerSlashCommand) => {
+      const { command, args } = input;
+      const commandDef = BUILT_IN_SLASH_COMMAND_BY_NAME.get(command);
+      if (commandDef?.requiresArg && args.length === 0) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: `/${command} needs an argument`,
+            description: `Usage: /${command} ${commandDef.argHint ?? "<value>"}`,
+          }),
+        );
+        return;
+      }
+      if (!activeThread || !activeThreadRef) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "No active thread",
+            description: "Choose a thread before running slash commands.",
+          }),
+        );
+        return;
+      }
+      switch (command) {
+        case "plan":
+        case "default":
+          void handleInteractionModeChange(command);
+          break;
+        case "todos":
+          toggleInteractionMode();
+          break;
+        case "clear":
+          if (activeProjectRef) {
+            handleNewThreadInActiveProject();
+          } else {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Choose a project first",
+                description: "Start a new thread requires an active project.",
+              }),
+            );
+          }
+          break;
+        case "rename": {
+          const title = args.trim();
+          if (title.length === 0) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Thread title cannot be empty",
+                description: `Usage: /rename ${commandDef?.argHint ?? "new title"}`,
+              }),
+            );
+            break;
+          }
+          const result = await updateThreadMetadata({
+            environmentId,
+            input: { threadId: activeThread.id, title },
+          });
+          if (result._tag === "Success") {
+            toastManager.add(
+              stackedThreadToast({
+                type: "success",
+                title: "Thread renamed",
+                description: `Renamed to “${title}”.`,
+              }),
+            );
+          } else {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not rename thread",
+                description:
+                  error instanceof Error ? error.message : "Unknown error renaming thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "context": {
+          const snapshot = deriveLatestContextWindowSnapshot(activeThread.activities ?? []);
+          if (!snapshot || snapshot.usedTokens === null) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "info",
+                title: "No context window data yet",
+                description: "Send a message first, then run /context to see usage.",
+              }),
+            );
+            break;
+          }
+          const usedLabel = formatContextWindowTokens(snapshot.usedTokens);
+          const maxLabel = formatContextWindowTokens(snapshot.maxTokens ?? null);
+          const percent = (snapshot.usedPercentage ?? null)?.toFixed(1) ?? "?";
+          const remainingLabel =
+            snapshot.remainingTokens !== null
+              ? formatContextWindowTokens(snapshot.remainingTokens)
+              : null;
+          toastManager.add(
+            stackedThreadToast({
+              type: "info",
+              title: `Context window: ${usedLabel} / ${maxLabel} (${percent}%)`,
+              description:
+                remainingLabel !== null
+                  ? `${remainingLabel} tokens remaining.`
+                  : "No context limit reported by this provider.",
+            }),
+          );
+          break;
+        }
+        case "stats": {
+          const recent = deriveLatestContextWindowSnapshot(activeThread.activities ?? []);
+          if (!recent || recent.usedTokens === null) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "info",
+                title: "No usage stats yet",
+                description: "Send a message first, then run /stats to see token usage.",
+              }),
+            );
+            break;
+          }
+          const lines = [
+            `Used: ${formatContextWindowTokens(recent.usedTokens)}`,
+            recent.inputTokens !== null
+              ? `Input: ${formatContextWindowTokens(recent.inputTokens ?? null)}`
+              : null,
+            recent.outputTokens !== null
+              ? `Output: ${formatContextWindowTokens(recent.outputTokens ?? null)}`
+              : null,
+            recent.toolUses !== null ? `Tool uses: ${recent.toolUses}` : null,
+          ];
+          toastManager.add(
+            stackedThreadToast({
+              type: "info",
+              title: "Session stats",
+              description: lines.filter((line): line is string => line !== null).join(" · "),
+            }),
+          );
+          break;
+        }
+        case "stop": {
+          if (phase === "running" || isSendBusy || isConnecting) {
+            const result = await interruptThreadTurn({
+              environmentId,
+              input: buildThreadTurnInterruptInput(activeThread),
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              setThreadError(
+                activeThread.id,
+                error instanceof Error ? error.message : "Failed to interrupt the current turn.",
+              );
+            }
+          } else {
+            toastManager.add(
+              stackedThreadToast({
+                type: "info",
+                title: "Nothing to stop",
+                description: "There is no active turn in this thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "revert": {
+          const turnCount = Number(args);
+          if (!Number.isInteger(turnCount) || turnCount <= 0) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Invalid checkpoint number",
+                description: `Usage: /revert ${commandDef?.argHint ?? "checkpoint number"}`,
+              }),
+            );
+            break;
+          }
+          const localApi = readLocalApi();
+          if (!localApi) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Revert not available",
+                description: "Revert needs the desktop app to confirm before destroying history.",
+              }),
+            );
+            break;
+          }
+          if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+            setThreadError(
+              activeThread.id,
+              `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
+            );
+            break;
+          }
+          if (phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Thread is busy",
+                description: "Interrupt the current turn before reverting checkpoints.",
+              }),
+            );
+            break;
+          }
+          const confirmed = await localApi.dialogs.confirm(
+            [
+              `Revert this thread to checkpoint ${turnCount}?`,
+              "This will discard newer messages and turn diffs in this thread.",
+              "This action cannot be undone.",
+            ].join("\n"),
+          );
+          if (!confirmed) {
+            break;
+          }
+          setIsRevertingCheckpoint(true);
+          setThreadError(activeThread.id, null);
+          const result = await revertThreadCheckpoint({
+            environmentId,
+            input: {
+              threadId: activeThread.id,
+              turnCount,
+            },
+          });
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not revert thread",
+                description:
+                  error instanceof Error ? error.message : "Failed to revert thread state.",
+              }),
+            );
+          }
+          setIsRevertingCheckpoint(false);
+          break;
+        }
+        case "archive": {
+          const result = await archiveThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not archive thread",
+                description:
+                  error instanceof Error
+                    ? error.message
+                    : "The thread is working. Interrupt it first, then try again.",
+              }),
+            );
+          }
+          break;
+        }
+        case "unarchive": {
+          const result = await unarchiveThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not unarchive thread",
+                description:
+                  error instanceof Error ? error.message : "Failed to unarchive this thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "pin": {
+          const result = await pinThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not pin thread",
+                description: error instanceof Error ? error.message : "Failed to pin this thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "unpin": {
+          const result = await unpinThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not unpin thread",
+                description:
+                  error instanceof Error ? error.message : "Failed to unpin this thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "settle": {
+          const result = await settleThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not settle thread",
+                description:
+                  error instanceof Error
+                    ? error.message
+                    : "This thread still needs attention. Resolve or interrupt it first.",
+              }),
+            );
+          }
+          break;
+        }
+        case "unsettle": {
+          const result = await unsettleThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not un-settle thread",
+                description:
+                  error instanceof Error ? error.message : "Failed to un-settle this thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "snooze": {
+          const until = parseSlashSnoozeDuration(args, new Date());
+          if (!until) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Invalid snooze duration",
+                description: `Usage: /snooze ${commandDef?.argHint ?? "30m, 2h, or 1d"}`,
+              }),
+            );
+            break;
+          }
+          const result = await snoozeThreadAction(activeThreadRef, until);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not snooze thread",
+                description:
+                  error instanceof Error
+                    ? error.message
+                    : "This thread is waiting on you. Respond to the pending request first.",
+              }),
+            );
+          }
+          break;
+        }
+        case "unsnooze": {
+          const result = await unsnoozeThreadAction(activeThreadRef);
+          if (result._tag === "Failure") {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not unsnooze thread",
+                description:
+                  error instanceof Error ? error.message : "Failed to unsnooze this thread.",
+              }),
+            );
+          }
+          break;
+        }
+        case "help": {
+          const commandLines = BUILT_IN_SLASH_COMMAND_DEFS.filter(
+            (def) => def.command !== "model",
+          ).map((def) => `/${def.command} — ${def.description}`);
+          toastManager.add(
+            stackedThreadToast({
+              type: "info",
+              title: "Slash commands",
+              description: commandLines.join("\n"),
+              timeout: 12_000,
+            }),
+          );
+          break;
+        }
+        default:
+          break;
+      }
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      activeProjectRef,
+      activeThread,
+      activeThreadRef,
+      archiveThreadAction,
+      environmentId,
+      handleInteractionModeChange,
+      handleNewThreadInActiveProject,
+      interruptThreadTurn,
+      isConnecting,
+      isRevertingCheckpoint,
+      isSendBusy,
+      phase,
+      pinThreadAction,
+      revertThreadCheckpoint,
+      setThreadError,
+      settleThreadAction,
+      snoozeThreadAction,
+      toggleInteractionMode,
+      unarchiveThreadAction,
+      unpinThreadAction,
+      unsettleThreadAction,
+      unsnoozeThreadAction,
+    ],
+  );
   const createBrowserSurface = useCallback(() => {
     if (!activeThreadRef) return;
     void addBrowserSurface({ threadRef: activeThreadRef, openPreview });
@@ -4906,7 +5344,7 @@ function ChatViewContent(props: ChatViewProps) {
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
-      handleInteractionModeChange(standaloneSlashCommand);
+      void executeStandaloneSlashCommand(standaloneSlashCommand);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -6262,6 +6700,9 @@ function ChatViewContent(props: ChatViewProps) {
                             toggleInteractionMode={toggleInteractionMode}
                             handleRuntimeModeChange={handleRuntimeModeChange}
                             handleInteractionModeChange={handleInteractionModeChange}
+                            onSlashCommand={(command, args) => {
+                              void executeStandaloneSlashCommand({ command, args });
+                            }}
                             focusComposer={focusComposer}
                             scheduleComposerFocus={scheduleComposerFocus}
                             setThreadError={setThreadError}

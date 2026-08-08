@@ -79,7 +79,10 @@ const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean 
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  if (provider.driver !== ProviderDriverKind.make("opencode")) {
+  if (
+    provider.driver !== ProviderDriverKind.make("opencode") &&
+    provider.driver !== ProviderDriverKind.make("commandcode")
+  ) {
     return true;
   }
 

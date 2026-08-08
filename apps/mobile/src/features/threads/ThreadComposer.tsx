@@ -9,6 +9,8 @@ import type {
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import {
+  BUILT_IN_SLASH_COMMAND_BY_NAME,
+  BUILT_IN_SLASH_COMMAND_DEFS,
   detectComposerTrigger,
   replaceTextRange,
   serializeComposerFileLink,
@@ -112,6 +114,12 @@ export interface ThreadComposerProps {
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
   readonly onReconnectEnvironment: () => void;
+  /**
+   * Dispatch a built-in slash command (e.g. /stop, /archive, /rename) against
+   * the selected thread. Returns true when the command was handled; false for
+   * commands the mobile surface cannot execute, which fall back to text.
+   */
+  readonly onDispatchSlashCommand?: (command: string, args: string) => boolean;
   readonly onExpandedChange?: (expanded: boolean) => void;
 }
 
@@ -380,30 +388,17 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
     if (composerTrigger.kind === "slash-command") {
       const q = composerTrigger.query.toLowerCase();
-      const allBuiltIn = [
-        {
-          id: "cmd:model",
+      const builtIn: ComposerCommandItem[] = [];
+      for (const def of BUILT_IN_SLASH_COMMAND_DEFS) {
+        if (!def.command.includes(q)) continue;
+        builtIn.push({
+          id: `cmd:${def.command}`,
           type: "slash-command" as const,
-          command: "model",
-          label: "/model",
-          description: "Switch model",
-        },
-        {
-          id: "cmd:plan",
-          type: "slash-command" as const,
-          command: "plan",
-          label: "/plan",
-          description: "Switch to plan mode",
-        },
-        {
-          id: "cmd:default",
-          type: "slash-command" as const,
-          command: "default",
-          label: "/default",
-          description: "Switch to default mode",
-        },
-      ];
-      const builtIn = allBuiltIn.filter((item) => item.command.includes(q));
+          command: def.command,
+          label: def.label,
+          description: def.description,
+        });
+      }
 
       const providerCommands: ComposerCommandItem[] = [];
       for (const cmd of selectedProviderStatus?.slashCommands ?? []) {
@@ -567,6 +562,23 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         return;
       }
 
+      if (item.type === "slash-command" && props.onDispatchSlashCommand) {
+        const def = BUILT_IN_SLASH_COMMAND_BY_NAME.get(item.command);
+        const dispatchable = def !== undefined && !def.requiresArg && item.command !== "model";
+        if (dispatchable) {
+          props.onDispatchSlashCommand(item.command, "");
+          const result = replaceTextRange(
+            draftMessage,
+            composerTrigger.rangeStart,
+            composerTrigger.rangeEnd,
+            "",
+          );
+          setComposerSelection({ start: result.cursor, end: result.cursor });
+          onChangeDraftMessage(result.text);
+          return;
+        }
+      }
+
       let replacement = "";
       if (item.type === "path") {
         replacement = `${serializeComposerFileLink(item.path)} `;
@@ -587,7 +599,13 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       setComposerSelection({ start: result.cursor, end: result.cursor });
       onChangeDraftMessage(result.text);
     },
-    [composerTrigger, draftMessage, onChangeDraftMessage, onUpdateInteractionMode],
+    [
+      composerTrigger,
+      draftMessage,
+      onChangeDraftMessage,
+      onUpdateInteractionMode,
+      props.onDispatchSlashCommand,
+    ],
   );
 
   // ── Model menu ───────────────────────────────────────────

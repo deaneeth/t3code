@@ -6,6 +6,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
+  parseSlashSnoozeDuration,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
   shouldSubmitComposerOnEnter,
@@ -361,14 +362,141 @@ describe("isCollapsedCursorAdjacentToInlineToken", () => {
 
 describe("parseStandaloneComposerSlashCommand", () => {
   it("parses standalone /plan command", () => {
-    expect(parseStandaloneComposerSlashCommand(" /plan ")).toBe("plan");
+    expect(parseStandaloneComposerSlashCommand(" /plan ")).toEqual({ command: "plan", args: "" });
   });
 
   it("parses standalone /default command", () => {
-    expect(parseStandaloneComposerSlashCommand("/default")).toBe("default");
+    expect(parseStandaloneComposerSlashCommand("/default")).toEqual({
+      command: "default",
+      args: "",
+    });
   });
 
-  it("ignores slash commands with extra message text", () => {
+  it("parses no-arg commands with surrounding whitespace", () => {
+    expect(parseStandaloneComposerSlashCommand("  /clear  ")).toEqual({
+      command: "clear",
+      args: "",
+    });
+  });
+
+  it("parses remaining no-arg commands", () => {
+    for (const command of [
+      "context",
+      "stats",
+      "help",
+      "todos",
+      "stop",
+      "archive",
+      "unarchive",
+      "pin",
+      "unpin",
+      "unsnooze",
+      "settle",
+      "unsettle",
+    ]) {
+      expect(parseStandaloneComposerSlashCommand(`/${command}`)).toEqual({
+        command,
+        args: "",
+      });
+    }
+  });
+
+  it("parses command names case-insensitively", () => {
+    expect(parseStandaloneComposerSlashCommand("/CLEAR")).toEqual({ command: "clear", args: "" });
+    expect(parseStandaloneComposerSlashCommand("/Plan")).toEqual({ command: "plan", args: "" });
+  });
+
+  it("parses arg commands with their arguments", () => {
+    expect(parseStandaloneComposerSlashCommand("/rename my cool thread")).toEqual({
+      command: "rename",
+      args: "my cool thread",
+    });
+    expect(parseStandaloneComposerSlashCommand("/revert 3")).toEqual({
+      command: "revert",
+      args: "3",
+    });
+    expect(parseStandaloneComposerSlashCommand("/snooze 2h")).toEqual({
+      command: "snooze",
+      args: "2h",
+    });
+  });
+
+  it("parses arg commands with trimmed trailing whitespace", () => {
+    expect(parseStandaloneComposerSlashCommand("/rename  my title  ")).toEqual({
+      command: "rename",
+      args: "my title",
+    });
+  });
+
+  it("returns args for arg commands even when empty", () => {
+    expect(parseStandaloneComposerSlashCommand("/rename")).toEqual({ command: "rename", args: "" });
+    expect(parseStandaloneComposerSlashCommand("/snooze")).toEqual({ command: "snooze", args: "" });
+  });
+
+  it("returns null for no-arg commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/clear everything now")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/stop please")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/default now")).toBeNull();
+  });
+
+  it("returns null for unknown commands", () => {
+    expect(parseStandaloneComposerSlashCommand("/quit")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/exit")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/foobar")).toBeNull();
+  });
+
+  it("returns null for /model (handled by picker, not standalone dispatch)", () => {
+    expect(parseStandaloneComposerSlashCommand("/model")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/model gpt-5")).toBeNull();
+  });
+
+  it("returns null for bare slash or malformed commands", () => {
+    expect(parseStandaloneComposerSlashCommand("/")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("//clear")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/3clear")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("just some text")).toBeNull();
+  });
+
+  it("does not treat text after newline as a command", () => {
+    expect(parseStandaloneComposerSlashCommand("some text\n/clear")).toBeNull();
+  });
+});
+
+describe("parseSlashSnoozeDuration", () => {
+  const now = new Date("2026-01-01T00:00:00.000Z");
+
+  it("parses minutes", () => {
+    expect(parseSlashSnoozeDuration("30m", now)).toBe("2026-01-01T00:30:00.000Z");
+  });
+
+  it("parses minutes aliases", () => {
+    expect(parseSlashSnoozeDuration("30min", now)).toBe("2026-01-01T00:30:00.000Z");
+  });
+
+  it("parses hours", () => {
+    expect(parseSlashSnoozeDuration("2h", now)).toBe("2026-01-01T02:00:00.000Z");
+  });
+
+  it("parses days", () => {
+    expect(parseSlashSnoozeDuration("1d", now)).toBe("2026-01-02T00:00:00.000Z");
+  });
+
+  it("parses seconds", () => {
+    expect(parseSlashSnoozeDuration("90s", now)).toBe("2026-01-01T00:01:30.000Z");
+  });
+
+  it("ignores surrounding whitespace", () => {
+    expect(parseSlashSnoozeDuration("  2h  ", now)).toBe("2026-01-01T02:00:00.000Z");
+  });
+
+  it("rejects invalid durations", () => {
+    expect(parseSlashSnoozeDuration("", now)).toBeNull();
+    expect(parseSlashSnoozeDuration("abc", now)).toBeNull();
+    expect(parseSlashSnoozeDuration("0m", now)).toBeNull();
+    expect(parseSlashSnoozeDuration("-1h", now)).toBeNull();
+    expect(parseSlashSnoozeDuration("2w", now)).toBeNull();
+    expect(parseSlashSnoozeDuration("m", now)).toBeNull();
   });
 });

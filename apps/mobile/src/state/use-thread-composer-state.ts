@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useEffect, useMemo } from "react";
+import { Alert } from "react-native";
 
 import {
   CommandId,
@@ -12,6 +13,10 @@ import {
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
+import {
+  parseSlashSnoozeDuration,
+  parseStandaloneComposerSlashCommand,
+} from "@t3tools/shared/composerTrigger";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
 import {
@@ -37,6 +42,8 @@ import {
   useComposerDraft,
 } from "./use-composer-drafts";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
+import { useAtomCommand } from "../state/use-atom-command";
+import { threadEnvironment } from "./threads";
 import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
@@ -133,6 +140,130 @@ export function useThreadComposerState() {
     !!selectedThread &&
     (selectedThread.session?.status === "running" || selectedThread.session?.status === "starting");
 
+  const snoozeCommand = useAtomCommand(threadEnvironment.snooze, { reportFailure: false });
+  const unsnoozeCommand = useAtomCommand(threadEnvironment.unsnooze, { reportFailure: false });
+  const archiveCommand = useAtomCommand(threadEnvironment.archive, { reportFailure: false });
+  const unarchiveCommand = useAtomCommand(threadEnvironment.unarchive, { reportFailure: false });
+  const pinCommand = useAtomCommand(threadEnvironment.pin, { reportFailure: false });
+  const unpinCommand = useAtomCommand(threadEnvironment.unpin, { reportFailure: false });
+  const settleCommand = useAtomCommand(threadEnvironment.settle, { reportFailure: false });
+  const unsettleCommand = useAtomCommand(threadEnvironment.unsettle, { reportFailure: false });
+  const updateMetadataCommand = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const interruptTurnCommand = useAtomCommand(threadEnvironment.interruptTurn, {
+    reportFailure: false,
+  });
+
+  /**
+   * Execute a built-in slash command against the selected thread. Returns
+   * true when the command was handled (and the composer draft should be
+   * cleared); false for commands the mobile surface cannot execute, letting
+   * callers fall back to sending the text.
+   */
+  const dispatchSlashCommand = useCallback(
+    (command: string, args: string): boolean => {
+      if (!selectedThreadShell) {
+        return false;
+      }
+      const environmentId = selectedThreadShell.environmentId;
+      const threadId = selectedThreadShell.id;
+      const threadKey = scopedThreadKey(environmentId, threadId);
+
+      switch (command) {
+        case "plan":
+        case "default":
+          updateComposerDraftSettings(threadKey, { interactionMode: command });
+          return true;
+        case "stop":
+          void interruptTurnCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "snooze": {
+          const snoozedUntil = parseSlashSnoozeDuration(args);
+          if (snoozedUntil === null) {
+            Alert.alert("Snooze", 'Give a duration like "/snooze 30m" or "/snooze 2h".');
+          } else {
+            void snoozeCommand({ environmentId, threadId, snoozedUntil }).catch(() => undefined);
+          }
+          return true;
+        }
+        case "unsnooze":
+          void unsnoozeCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "archive":
+          void archiveCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "unarchive":
+          void unarchiveCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "pin":
+          void pinCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "unpin":
+          void unpinCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "settle":
+          void settleCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "unsettle":
+          void unsettleCommand({ environmentId, threadId }).catch(() => undefined);
+          return true;
+        case "rename": {
+          const title = args.trim();
+          if (title.length === 0) {
+            Alert.alert("Rename thread", 'Give it a name, like "/rename bug hunt".');
+            return true;
+          }
+          void updateMetadataCommand({ environmentId, threadId, title }).catch(() => undefined);
+          return true;
+        }
+        case "help":
+          Alert.alert(
+            "Slash commands",
+            "/plan, /default, /stop, /rename <title>, /snooze <duration>, /unsnooze, /archive, /unarchive, /pin, /unpin, /settle, /unsettle, /clear, /todos",
+          );
+          return true;
+        case "clear":
+          Alert.alert(
+            "Start a new thread",
+            "Head to the thread list and start a new one to clear this conversation.",
+          );
+          return true;
+        case "todos":
+          Alert.alert("Plan and tasks", "Open the plan for this thread from the details panel.");
+          return true;
+        case "context":
+        case "stats":
+          Alert.alert(
+            "Not available on mobile",
+            "Context and usage stats are shown in the full app.",
+          );
+          return true;
+        case "revert":
+          Alert.alert(
+            "Not available on mobile",
+            "Reverting a thread needs the checkpoint picker in the full app.",
+          );
+          return true;
+        default:
+          return false;
+      }
+    },
+    [
+      archiveCommand,
+      interruptTurnCommand,
+      pinCommand,
+      selectedThreadShell,
+      settleCommand,
+      snoozeCommand,
+      unarchiveCommand,
+      unpinCommand,
+      unsettleCommand,
+      unsnoozeCommand,
+      updateMetadataCommand,
+    ],
+  );
+
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {
       return null;
@@ -149,6 +280,17 @@ export function useThreadComposerState() {
 
     const metadata = makeQueuedMessageMetadata();
     const messageId = MessageId.make(metadata.messageId);
+    if (attachments.length === 0) {
+      const standalone = parseStandaloneComposerSlashCommand(text);
+      if (standalone) {
+        const handled = dispatchSlashCommand(standalone.command, standalone.args);
+        if (handled) {
+          clearComposerDraftContent(threadKey);
+          return null;
+        }
+      }
+    }
+
     // Enqueue publishes the queued atom synchronously (the durable write
     // happens behind it), so clearing the draft here gives send feedback on
     // the tap frame instead of after file I/O. If the write fails the message
@@ -179,7 +321,7 @@ export function useThreadComposerState() {
       );
     });
     return messageId;
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [dispatchSlashCommand, selectedThreadDetail, selectedThreadShell]);
 
   const onChangeDraftMessage = useCallback(
     (value: string) => {
@@ -318,5 +460,6 @@ export function useThreadComposerState() {
     onUpdateModelSelection,
     onUpdateRuntimeMode,
     onUpdateInteractionMode,
+    dispatchSlashCommand,
   };
 }

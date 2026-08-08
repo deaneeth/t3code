@@ -34,6 +34,9 @@ import {
 import { createPortal } from "react-dom";
 import {
   clampCollapsedComposerCursor,
+  BUILT_IN_SLASH_COMMAND_BY_NAME,
+  BUILT_IN_SLASH_COMMAND_DEFS,
+  type ComposerSlashCommand,
   type ComposerTrigger,
   collapseExpandedComposerCursor,
   detectComposerTrigger,
@@ -390,6 +393,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadProviderDisplayName: string | null;
+  activeThreadProviderDriverKind: string | null;
+  activeThreadActivities: Thread["activities"] | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -417,6 +422,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           providerDisplayName={props.activeThreadProviderDisplayName}
+          providerDriverKind={props.activeThreadProviderDriverKind}
+          activities={props.activeThreadActivities}
         />
       ) : null}
       {props.isPreparingWorktree ? (
@@ -589,6 +596,8 @@ export interface ChatComposerProps {
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
+  /** Dispatch an immediate-action standalone slash command (e.g. /clear, /help). */
+  onSlashCommand: (command: Exclude<ComposerSlashCommand, "model">, args: string) => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;
@@ -661,6 +670,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
+    onSlashCommand,
     focusComposer,
     scheduleComposerFocus,
     setThreadError,
@@ -929,6 +939,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return formatProviderDisplayName(activeThreadModelSelection.instanceId);
   }, [providerStatuses, activeThreadModelSelection]);
 
+  const activeThreadProviderDriverKind = useMemo(() => {
+    if (!activeThreadModelSelection) return null;
+    const entry = providerStatuses.find(
+      (p) => p.instanceId === activeThreadModelSelection.instanceId,
+    );
+    return entry?.driver ?? null;
+  }, [providerStatuses, activeThreadModelSelection]);
+
   // ------------------------------------------------------------------
   // Composer-local state
   // ------------------------------------------------------------------
@@ -1037,33 +1055,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }));
     }
     if (composerTrigger.kind === "slash-command") {
-      const builtInSlashCommandItems = [
-        {
-          id: "slash:model",
-          type: "slash-command",
-          command: "model",
-          label: "/model",
-          description: "Switch response model for this thread",
-        },
-        ...(planModeUiEnabled
-          ? ([
-              {
-                id: "slash:plan",
-                type: "slash-command",
-                command: "plan",
-                label: "/plan",
-                description: "Switch this thread into plan mode",
-              },
-              {
-                id: "slash:default",
-                type: "slash-command",
-                command: "default",
-                label: "/default",
-                description: "Switch this thread back to normal build mode",
-              },
-            ] as const)
-          : []),
-      ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
+      const builtInSlashCommandItems = BUILT_IN_SLASH_COMMAND_DEFS.map((def) => ({
+        id: `slash:${def.command}`,
+        type: "slash-command" as const,
+        command: def.command,
+        label: def.label,
+        description: def.description,
+      }));
       const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
         (command) => ({
           id: `provider-slash-command:${selectedProvider}:${command.name}`,
@@ -1688,12 +1686,38 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
-        void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
+        if (item.command === "plan" || item.command === "default") {
+          void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+          }
+          return;
+        }
+        const requiresArg = BUILT_IN_SLASH_COMMAND_BY_NAME.get(item.command)?.requiresArg ?? false;
+        if (requiresArg) {
+          // Commands with arguments stay in the composer so the user fills
+          // in the argument; hitting Enter then dispatches it.
+          const replacement = `/${item.command} `;
+          const applied = applyPromptReplacement(
+            trigger.rangeStart,
+            trigger.rangeEnd,
+            replacement,
+            { expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd) },
+          );
+          if (applied) {
+            setComposerHighlightedItemId(null);
+          }
+          return;
+        }
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
         });
         if (applied) {
           setComposerHighlightedItemId(null);
+          onSlashCommand(item.command, "");
         }
         return;
       }
@@ -3186,6 +3210,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
+                  activeThreadProviderDriverKind={activeThreadProviderDriverKind}
+                  activeThreadActivities={activeThreadActivities}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

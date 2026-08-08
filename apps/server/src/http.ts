@@ -10,8 +10,9 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
+import * as NodeOS from "node:os";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import { cast } from "effect/Function";
 import {
   HttpBody,
@@ -39,6 +40,7 @@ import {
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
+import { fetchCommandCodeUsage } from "./provider/CommandCodeUsageApi.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -307,4 +309,28 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       contentType,
     });
   }),
+);
+
+export const commandCodeUsageRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/provider/commandcode/usage",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+    const path = yield* Path.Path;
+    const authJsonPath = path.join(NodeOS.homedir(), ".commandcode", "auth.json");
+    const result = yield* fetchCommandCodeUsage(authJsonPath).pipe(
+      Effect.catchTag("CommandCodeUsageError", (error) => Effect.succeed({ error: error.message })),
+    );
+
+    if (result && typeof result === "object" && "error" in result) {
+      return HttpServerResponse.jsonUnsafe(result, { status: 502 });
+    }
+    return HttpServerResponse.jsonUnsafe(result);
+  }).pipe(
+    Effect.catchTags({
+      EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+      EnvironmentInternalError: HttpServerRespondable.toResponse,
+      EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+    }),
+  ),
 );
