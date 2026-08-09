@@ -224,10 +224,12 @@ import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import {
   deriveLatestContextWindowSnapshot,
   formatProviderDisplayName,
+  makeUnavailableContextWindowSnapshot,
 } from "../../lib/contextWindow";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { usePrimaryEnvironmentId } from "../../state/environments";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const runtimeModeConfig: Record<
@@ -391,10 +393,13 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
 
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
-  activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
+  showContextWindowMeter: boolean;
+  activeContextWindow: NonNullable<ReturnType<typeof deriveLatestContextWindowSnapshot>>;
+  contextWindowReported: boolean;
   activeThreadProviderDisplayName: string | null;
   activeThreadProviderDriverKind: string | null;
   activeThreadProviderInstanceId: string | null;
+  liveProviderLimitsEnabled: boolean;
   activeThreadActivities: Thread["activities"] | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
@@ -419,13 +424,15 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {props.activeContextWindow ? (
+      {props.showContextWindowMeter ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
+          contextWindowReported={props.contextWindowReported}
           providerDisplayName={props.activeThreadProviderDisplayName}
           providerDriverKind={props.activeThreadProviderDriverKind}
           providerInstanceId={props.activeThreadProviderInstanceId}
           activities={props.activeThreadActivities}
+          allowLiveProviderLimits={props.liveProviderLimitsEnabled}
         />
       ) : null}
       {props.isPreparingWorktree ? (
@@ -619,7 +626,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     routeThreadRef,
     draftId,
     activeThreadId,
-    activeThreadEnvironmentId: _activeThreadEnvironmentId,
+    activeThreadEnvironmentId,
     activeThread,
     isServerThread: _isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
@@ -930,30 +937,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => deriveLatestContextWindowSnapshot(activeThreadActivities ?? []),
     [activeThreadActivities],
   );
+  const contextWindowForMeter = useMemo(
+    () => activeContextWindow ?? makeUnavailableContextWindowSnapshot(),
+    [activeContextWindow],
+  );
+  const contextModelSelection =
+    routeKind === "draft" ? selectedModelSelection : activeThreadModelSelection;
   const activeThreadProviderDisplayName = useMemo(() => {
-    if (!activeThreadModelSelection) return null;
-    const entry = providerStatuses.find(
-      (p) => p.instanceId === activeThreadModelSelection.instanceId,
-    );
+    if (!contextModelSelection) return null;
+    const entry = providerStatuses.find((p) => p.instanceId === contextModelSelection.instanceId);
     if (entry) {
       return getProviderDisplayName(providerStatuses, entry.driver);
     }
-    return formatProviderDisplayName(activeThreadModelSelection.instanceId);
-  }, [providerStatuses, activeThreadModelSelection]);
+    return formatProviderDisplayName(contextModelSelection.instanceId);
+  }, [providerStatuses, contextModelSelection]);
 
   const activeThreadProviderDriverKind = useMemo(() => {
-    if (!activeThreadModelSelection) return null;
-    const entry = providerStatuses.find(
-      (p) => p.instanceId === activeThreadModelSelection.instanceId,
-    );
+    if (!contextModelSelection) return null;
+    const entry = providerStatuses.find((p) => p.instanceId === contextModelSelection.instanceId);
     return (
       entry?.driver ??
       providerInstanceEntries.find(
-        (candidate) => candidate.instanceId === activeThreadModelSelection.instanceId,
+        (candidate) => candidate.instanceId === contextModelSelection.instanceId,
       )?.driverKind ??
       null
     );
-  }, [activeThreadModelSelection, providerInstanceEntries, providerStatuses]);
+  }, [contextModelSelection, providerInstanceEntries, providerStatuses]);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const activeProviderEnvironmentId = activeThreadEnvironmentId ?? environmentId;
+  const showContextWindowMeter =
+    contextModelSelection !== null && activeThreadProviderDriverKind !== null;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -3216,11 +3229,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               >
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
-                  activeContextWindow={activeContextWindow}
+                  showContextWindowMeter={showContextWindowMeter}
+                  activeContextWindow={contextWindowForMeter}
+                  contextWindowReported={activeContextWindow !== null}
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
                   activeThreadProviderDriverKind={activeThreadProviderDriverKind}
-                  activeThreadProviderInstanceId={selectedInstanceId}
+                  activeThreadProviderInstanceId={
+                    contextModelSelection?.instanceId ?? selectedInstanceId
+                  }
                   activeThreadActivities={activeThreadActivities}
+                  liveProviderLimitsEnabled={
+                    primaryEnvironmentId === null ||
+                    activeProviderEnvironmentId === primaryEnvironmentId
+                  }
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

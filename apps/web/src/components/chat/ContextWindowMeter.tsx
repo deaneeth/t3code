@@ -182,8 +182,32 @@ function ProviderRateLimitWindowBar(props: {
   );
 }
 
-function ProviderRateLimitSection(props: { snapshot: ProviderRateLimitSnapshot }) {
-  const { snapshot } = props;
+function ProviderRateLimitSection(props: {
+  snapshot: ProviderRateLimitSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  providerDisplayName?: string | null | undefined;
+}) {
+  const { snapshot, loading, error, providerDisplayName } = props;
+  if (!snapshot) {
+    return (
+      <div className="mt-2 flex flex-col gap-2 border-t border-muted/60 pt-2">
+        <div className="flex items-center justify-between text-[11px] leading-4">
+          <span className="text-muted-foreground/60">Rate Limits</span>
+          <span className="font-medium text-muted-foreground/60">
+            {loading ? "Reading…" : "Unavailable"}
+          </span>
+        </div>
+        <div className="text-[10px] text-muted-foreground/50">
+          {error
+            ? `Provider quota telemetry unavailable: ${error}`
+            : loading
+              ? "Reading the provider's latest quota report…"
+              : `${providerDisplayName ?? "This provider"} did not report quota telemetry.`}
+        </div>
+      </div>
+    );
+  }
   const { windows, credits, spendControl, planType, status, reachedType } = snapshot;
 
   const getStatusColor = () => {
@@ -288,10 +312,21 @@ export function ContextWindowMeter(props: {
   providerDriverKind?: string | null;
   providerInstanceId?: string | null;
   activities?: ReadonlyArray<OrchestrationThreadActivity> | undefined;
+  allowLiveProviderLimits?: boolean;
+  contextWindowReported?: boolean;
 }) {
-  const { usage, providerDisplayName, providerDriverKind, providerInstanceId, activities } = props;
+  const {
+    usage,
+    providerDisplayName,
+    providerDriverKind,
+    providerInstanceId,
+    activities,
+    allowLiveProviderLimits = true,
+    contextWindowReported = true,
+  } = props;
   const isCommandCode = providerDriverKind === "commandcode";
-  const isCodexOrClaude = providerDriverKind === "codex" || providerDriverKind === "claude";
+  const isClaude = providerDriverKind === "claude" || providerDriverKind === "claudeAgent";
+  const isProviderWithRateLimits = providerDriverKind === "codex" || isClaude;
   const {
     data: commandCodeUsage,
     loading: commandCodeLoading,
@@ -299,16 +334,20 @@ export function ContextWindowMeter(props: {
   } = useCommandCodeUsage(isCommandCode, providerInstanceId);
   const rateLimits = useProviderRateLimits(
     activities ?? null,
-    isCodexOrClaude ? providerDriverKind : null,
+    isProviderWithRateLimits ? (isClaude ? "claude" : providerDriverKind) : null,
   );
-  const { data: providerLimits } = useProviderLimits(isCodexOrClaude);
+  const {
+    data: providerLimits,
+    loading: providerLimitsLoading,
+    error: providerLimitsError,
+  } = useProviderLimits(allowLiveProviderLimits && isProviderWithRateLimits);
   const liveRateLimits = useMemo(() => {
     if (!providerLimits) return null;
     const snapshot = providerLimits.snapshots.find(
       (candidate) =>
         (candidate.instanceId === providerInstanceId || !providerInstanceId) &&
         (candidate.driver === providerDriverKind ||
-          (providerDriverKind === "claude" && candidate.driver === "claudeAgent")),
+          (isClaude && (candidate.driver === "claude" || candidate.driver === "claudeAgent"))),
     );
     return snapshot ? toProviderRateLimitSnapshot(snapshot) : null;
   }, [providerDriverKind, providerInstanceId, providerLimits]);
@@ -366,9 +405,11 @@ export function ContextWindowMeter(props: {
               "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
             )}
             aria-label={
-              usage.maxTokens !== null && usedPercentage
-                ? `Context window ${usedPercentage} used`
-                : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
+              !contextWindowReported
+                ? `${providerDisplayName ?? "Provider"} context usage not reported`
+                : usage.maxTokens !== null && usedPercentage
+                  ? `Context window ${usedPercentage} used`
+                  : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
             }
           >
             <span className="relative flex size-5 items-center justify-center">
@@ -412,7 +453,7 @@ export function ContextWindowMeter(props: {
         <div className="flex flex-col gap-2 p-[var(--floating-content-inset)]">
           <div className="flex items-center justify-between gap-3">
             <div className="font-medium text-muted-foreground text-xs">Context Window</div>
-            {usage.maxTokens !== null && usedPercentage ? (
+            {contextWindowReported && usage.maxTokens !== null && usedPercentage ? (
               <div className="text-secondary-label text-[11px] tabular-nums">
                 <span>{usedPercentage}</span>
                 <span className="mx-1">·</span>
@@ -421,13 +462,15 @@ export function ContextWindowMeter(props: {
                   {formatContextWindowTokens(usage.maxTokens ?? null)}
                 </span>
               </div>
-            ) : (
+            ) : contextWindowReported ? (
               <div className="text-secondary-label text-[11px] tabular-nums">
                 {formatContextWindowTokens(usage.usedTokens)}
               </div>
+            ) : (
+              <div className="text-secondary-label text-[11px] tabular-nums">Not reported</div>
             )}
           </div>
-          {usage.maxTokens !== null ? (
+          {contextWindowReported && usage.maxTokens !== null ? (
             <div
               className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60"
               role="progressbar"
@@ -587,8 +630,22 @@ export function ContextWindowMeter(props: {
               </svg>
             </a>
           ) : null}
-          {effectiveRateLimits && !isCommandCode ? (
-            <ProviderRateLimitSection snapshot={effectiveRateLimits} />
+          {isProviderWithRateLimits ? (
+            <ProviderRateLimitSection
+              snapshot={effectiveRateLimits}
+              loading={allowLiveProviderLimits && providerLimitsLoading}
+              error={
+                allowLiveProviderLimits
+                  ? providerLimitsError
+                  : "Live quota telemetry is scoped to the primary connected environment."
+              }
+              providerDisplayName={providerDisplayName}
+            />
+          ) : !isCommandCode ? (
+            <div className="mt-2 border-t border-muted/60 pt-2 text-[10px] text-muted-foreground/50">
+              Context and quota telemetry is not reported by{" "}
+              {providerDisplayName ?? "this provider"}.
+            </div>
           ) : null}
         </div>
       </PopoverPopup>

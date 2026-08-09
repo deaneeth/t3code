@@ -25,6 +25,32 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly updatedAt: string;
 };
 
+/** A truthful placeholder used when a provider has no context event yet. */
+export function makeUnavailableContextWindowSnapshot(): ContextWindowSnapshot {
+  return {
+    usedTokens: 0,
+    totalProcessedTokens: null,
+    maxTokens: null,
+    remainingTokens: null,
+    usedPercentage: null,
+    remainingPercentage: null,
+    inputTokens: null,
+    cachedInputTokens: null,
+    cacheCreationTokens: null,
+    outputTokens: null,
+    reasoningOutputTokens: null,
+    lastUsedTokens: null,
+    lastInputTokens: null,
+    lastCachedInputTokens: null,
+    lastOutputTokens: null,
+    lastReasoningOutputTokens: null,
+    toolUses: null,
+    durationMs: null,
+    compactsAutomatically: false,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 /** Map a provider driver kind to a user-facing display name. */
 export function formatProviderDisplayName(provider: string | null | undefined): string {
   if (!provider) return "This agent";

@@ -137,8 +137,26 @@ export function useProviderLimits(enabled: boolean) {
     try {
       const response = await fetch("/api/provider/limits", { signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      setData(sanitizeProviderLimitsResponse(await response.json()));
-      failedAttemptsRef.current = 0;
+      const next = sanitizeProviderLimitsResponse(await response.json());
+      setData(next);
+      // An empty response is truthful, but can also mean the provider
+      // registry/projection is still warming up. Give startup a bounded
+      // chance to publish native telemetry before settling on that state.
+      const retryDelay =
+        next.snapshots.length === 0 ? providerLimitsRetryDelay(failedAttemptsRef.current) : null;
+      if (retryDelay !== null && retryTimerRef.current === null) {
+        failedAttemptsRef.current += 1;
+        retryTimerRef.current = globalThis.setTimeout(() => {
+          retryTimerRef.current = null;
+          void fetchLimits();
+        }, retryDelay);
+      } else {
+        if (retryTimerRef.current !== null) {
+          globalThis.clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+        failedAttemptsRef.current = 0;
+      }
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       setData(null);
@@ -155,7 +173,9 @@ export function useProviderLimits(enabled: boolean) {
     } finally {
       loadedRef.current = true;
       if (requestRef.current === controller) requestRef.current = null;
-      setLoading(false);
+      // Keep the loading state visible while a bounded retry is pending. This
+      // prevents the UI from calling an in-flight retry "no telemetry".
+      setLoading(retryTimerRef.current !== null);
     }
   }, []);
 

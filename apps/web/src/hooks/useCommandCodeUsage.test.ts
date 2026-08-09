@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vite-plus/test";
-import { sanitizeCommandCodeResult } from "./useCommandCodeUsage";
+import { commandCodeUsageRetryDelay, sanitizeCommandCodeResult } from "./useCommandCodeUsage";
+
+describe("commandCodeUsageRetryDelay", () => {
+  it("uses bounded delays for transient account-read failures", () => {
+    expect([0, 1, 2].map(commandCodeUsageRetryDelay)).toEqual([1_000, 5_000, 15_000]);
+    expect(commandCodeUsageRetryDelay(3)).toBeNull();
+    expect(commandCodeUsageRetryDelay(-1)).toBeNull();
+  });
+});
 
 describe("sanitizeCommandCodeResult", () => {
   it("round-trips a valid response unchanged", () => {

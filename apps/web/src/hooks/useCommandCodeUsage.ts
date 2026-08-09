@@ -59,6 +59,12 @@ function formatResetsIn(resetAtMs: number): string {
 
 const POLL_INTERVAL_MS = 10_000;
 const TICK_INTERVAL_MS = 30_000;
+const RETRY_DELAYS_MS = [1_000, 5_000, 15_000] as const;
+
+export function commandCodeUsageRetryDelay(attempt: number): number | null {
+  if (!Number.isInteger(attempt) || attempt < 0 || attempt >= RETRY_DELAYS_MS.length) return null;
+  return RETRY_DELAYS_MS[attempt] ?? null;
+}
 
 function toFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -185,6 +191,8 @@ export function useCommandCodeUsage(enabled: boolean, instanceId?: string | null
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const failedAttemptsRef = useRef(0);
   const loadedRef = useRef(false);
 
   const fetchUsage = useCallback(async () => {
@@ -206,21 +214,48 @@ export function useCommandCodeUsage(enabled: boolean, instanceId?: string | null
         throw new Error(String((result as { error?: unknown }).error ?? "Unknown error"));
       }
       setData(sanitizeCommandCodeResult(result));
+      if (retryTimerRef.current !== null) {
+        globalThis.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      failedAttemptsRef.current = 0;
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       setData(null);
       setError(e instanceof Error ? e.message : String(e));
+      const retryDelay = commandCodeUsageRetryDelay(failedAttemptsRef.current);
+      failedAttemptsRef.current += 1;
+      if (retryDelay !== null && retryTimerRef.current === null) {
+        retryTimerRef.current = globalThis.setTimeout(() => {
+          retryTimerRef.current = null;
+          void fetchUsage();
+        }, retryDelay);
+      }
     } finally {
       loadedRef.current = true;
       if (requestRef.current === controller) requestRef.current = null;
-      setLoading(false);
+      setLoading(retryTimerRef.current !== null);
     }
   }, [instanceId]);
+
+  const refetch = useCallback(() => {
+    if (retryTimerRef.current !== null) {
+      globalThis.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    failedAttemptsRef.current = 0;
+    return fetchUsage();
+  }, [fetchUsage]);
 
   useEffect(() => {
     if (!enabled) {
       requestRef.current?.abort();
       requestRef.current = null;
+      if (retryTimerRef.current !== null) {
+        globalThis.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      failedAttemptsRef.current = 0;
       loadedRef.current = false;
       setData(null);
       setError(null);
@@ -233,6 +268,11 @@ export function useCommandCodeUsage(enabled: boolean, instanceId?: string | null
 
     return () => {
       requestRef.current?.abort();
+      if (retryTimerRef.current !== null) {
+        globalThis.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      failedAttemptsRef.current = 0;
       clearInterval(pollInterval);
     };
   }, [enabled, fetchUsage]);
@@ -274,5 +314,5 @@ export function useCommandCodeUsage(enabled: boolean, instanceId?: string | null
     return () => clearInterval(tickInterval);
   }, [enabled, data?.windowLimits.fiveHour.resetAtMs, data?.windowLimits.weekly.resetAtMs]);
 
-  return { data, loading, error, refetch: fetchUsage };
+  return { data, loading, error, refetch };
 }

@@ -111,7 +111,7 @@ export function ProviderPlansPanel({ refreshSignal = 0 }: { readonly refreshSign
           </p>
         </div>
         <span className="text-xs text-muted-foreground">
-          {providerLimits.loading && !providerLimits.data
+          {providerLimits.loading
             ? "Reading provider telemetry…"
             : providerLimits.data
               ? `Telemetry read ${formatAge(providerLimits.data.readAt)}`
