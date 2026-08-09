@@ -4,6 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSession,
+  RuntimeTaskId,
   type ProviderRuntimeEvent,
   type ProviderSendTurnInput,
   type ProviderSessionStartInput,
@@ -107,16 +108,102 @@ export function readCommandCodeSessionId(cursor: unknown): string | undefined {
 
 function toolItemType(
   toolName: string,
-): "command_execution" | "file_change" | "mcp_tool_call" | "dynamic_tool_call" {
+):
+  | "command_execution"
+  | "file_change"
+  | "mcp_tool_call"
+  | "collab_agent_tool_call"
+  | "web_search"
+  | "image_view"
+  | "dynamic_tool_call" {
   const normalized = toolName.toLowerCase();
   if (/(?:bash|shell|command|exec|terminal)/u.test(normalized)) return "command_execution";
   if (/(?:write|edit|patch|delete|move)/u.test(normalized)) return "file_change";
   if (normalized.includes("mcp")) return "mcp_tool_call";
+  if (isCommandCodeAgentTool(toolName)) return "collab_agent_tool_call";
+  if (/(?:web|search|browse)/u.test(normalized)) return "web_search";
+  if (/(?:image|vision)/u.test(normalized)) return "image_view";
   return "dynamic_tool_call";
+}
+
+export function isCommandCodeAgentTool(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  if (/^task_(?:create|update|list|get|output|stop)$/u.test(normalized)) return false;
+  return /(?:agent|subagent|subtask|spawn[_-]?agent|(?:^|[_./-])task(?:$|[_./-]))/u.test(
+    normalized,
+  );
 }
 
 function readToolName(event: Record<string, unknown>): string {
   return stringValue(event.toolName) ?? stringValue(event.name) ?? "CommandCode tool";
+}
+
+function isTodoTool(toolName: string): boolean {
+  return /(?:^|[_./-])todo(?:[_./-]?write)?(?:$|[_./-])/u.test(toolName.toLowerCase());
+}
+
+function readToolInput(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return recordValue(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+  return recordValue(value);
+}
+
+/** Convert CommandCode's todo_write payload into the shared plan shape. */
+export function extractCommandCodeTodoPlan(value: unknown): Array<{
+  readonly step: string;
+  readonly status: "pending" | "inProgress" | "completed";
+}> | null {
+  const input = readToolInput(value);
+  const todos = input?.todos;
+  if (!Array.isArray(todos) || todos.length === 0) return null;
+
+  const plan = todos
+    .filter((todo): todo is Record<string, unknown> => recordValue(todo) !== undefined)
+    .map((todo) => ({
+      step:
+        stringValue(todo.content) ?? stringValue(todo.title) ?? stringValue(todo.step) ?? "Task",
+      status:
+        todo.status === "completed"
+          ? ("completed" as const)
+          : todo.status === "in_progress" || todo.status === "inProgress"
+            ? ("inProgress" as const)
+            : ("pending" as const),
+    }))
+    .filter((todo) => todo.step.length > 0);
+
+  return plan.length > 0 ? plan : null;
+}
+
+/** Translate CommandCode's documented headless exit codes into actionable UI errors. */
+export function commandCodeExitReason(exitCode: number): string | undefined {
+  switch (exitCode) {
+    case 3:
+      return "CommandCode authentication is required or has expired.";
+    case 4:
+      return "CommandCode denied the operation because the permission mode did not allow it.";
+    case 5:
+      return "CommandCode reached a usage limit.";
+    case 6:
+      return "CommandCode could not reach its model service.";
+    case 7:
+      return "CommandCode's service reported a server error.";
+    case 8:
+      return "CommandCode stopped after reaching its maximum turn count.";
+    case 9:
+      return "CommandCode did not receive a model response.";
+    case 10:
+      return "CommandCode has insufficient credits for this request.";
+    case 130:
+      return "CommandCode was interrupted.";
+    default:
+      return undefined;
+  }
 }
 
 export function runtimeModeArgs(
@@ -161,22 +248,37 @@ export function usageSnapshot(usage: unknown): Record<string, number> | undefine
   const inputTokens = numeric("inputTokens");
   const outputTokens = numeric("outputTokens");
   const reasoningOutputTokens = numeric("reasoningOutputTokens");
-  const cachedInputTokens = numeric("cachedInputTokens");
+  // CommandCode's JSON protocol calls these cacheReadTokens/cacheWriteTokens.
+  // Keep the internal names aligned with the cross-provider usage contract,
+  // while accepting the aliases used by other adapters as well.
+  const cachedInputTokens =
+    numeric("cachedInputTokens") ?? numeric("cacheReadTokens") ?? numeric("cache_read_tokens");
+  const cacheCreationTokens =
+    numeric("cacheCreationTokens") ?? numeric("cacheWriteTokens") ?? numeric("cache_write_tokens");
   const maxTokens = numeric("maxTokens") ?? numeric("contextWindow") ?? numeric("context_window");
   const hasTokenComponents =
-    inputTokens !== undefined || outputTokens !== undefined || reasoningOutputTokens !== undefined;
+    inputTokens !== undefined ||
+    cachedInputTokens !== undefined ||
+    cacheCreationTokens !== undefined ||
+    outputTokens !== undefined ||
+    reasoningOutputTokens !== undefined;
   const totalTokens =
     numeric("totalTokens") ??
     numeric("total") ??
     numeric("tokens") ??
     (hasTokenComponents
-      ? (inputTokens ?? 0) + (outputTokens ?? 0) + (reasoningOutputTokens ?? 0)
+      ? (inputTokens ?? 0) +
+        (cachedInputTokens ?? 0) +
+        (cacheCreationTokens ?? 0) +
+        (outputTokens ?? 0) +
+        (reasoningOutputTokens ?? 0)
       : undefined);
   if (totalTokens === undefined) return undefined;
   return {
     totalTokens,
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
@@ -392,6 +494,69 @@ export function makeCommandCodeAdapter(
           const toolName = readToolName(event);
           const toolCallId = stringValue(event.toolCallId) ?? `${turnId}-${toolName}`;
           const completed = type === "tool_completed" || type === "tool_errored";
+          const todoPlan = isTodoTool(toolName)
+            ? extractCommandCodeTodoPlan(event.input ?? event.arguments)
+            : null;
+          if (todoPlan) {
+            yield* emit({
+              type: "turn.plan.updated",
+              threadId: context.threadId,
+              turnId,
+              payload: {
+                explanation: "CommandCode TodoWrite",
+                plan: todoPlan,
+              },
+              method: type,
+              raw,
+            });
+          }
+          if (isCommandCodeAgentTool(toolName)) {
+            const taskId = RuntimeTaskId.make(toolCallId);
+            const taskPayload = {
+              taskId,
+              taskType: "subagent",
+              title: stringValue(event.description) ?? toolName,
+              description: stringValue(event.description) ?? toolName,
+              role: stringValue(event.agentType) ?? "general",
+              toolUseId: toolCallId,
+              timelineBypass: true,
+            };
+            if (type === "tool_queued") {
+              yield* emit({
+                type: "task.started",
+                threadId: context.threadId,
+                turnId,
+                payload: taskPayload,
+                method: type,
+                raw,
+              });
+            } else if (completed) {
+              yield* emit({
+                type: "task.completed",
+                threadId: context.threadId,
+                turnId,
+                payload: {
+                  ...taskPayload,
+                  status: type === "tool_errored" ? "failed" : "completed",
+                  ...(stringValue(event.result) ? { summary: stringValue(event.result) } : {}),
+                },
+                method: type,
+                raw,
+              });
+            } else {
+              yield* emit({
+                type: "task.progress",
+                threadId: context.threadId,
+                turnId,
+                payload: {
+                  ...taskPayload,
+                  ...(stringValue(event.partial) ? { summary: stringValue(event.partial) } : {}),
+                },
+                method: type,
+                raw,
+              });
+            }
+          }
           yield* emit({
             type: completed
               ? "item.completed"
@@ -440,6 +605,25 @@ export function makeCommandCodeAdapter(
             method: type,
             raw,
           });
+          if (isCommandCodeAgentTool(toolName)) {
+            yield* emit({
+              type: "task.completed",
+              threadId: context.threadId,
+              turnId,
+              payload: {
+                taskId: RuntimeTaskId.make(toolCallId),
+                taskType: "subagent",
+                title: toolName,
+                role: "general",
+                toolUseId: toolCallId,
+                timelineBypass: true,
+                status: "failed",
+                summary: stringValue(event.hookOutput) ?? "CommandCode blocked this tool call.",
+              },
+              method: type,
+              raw,
+            });
+          }
           yield* emit({
             type: "item.completed",
             threadId: context.threadId,
@@ -472,6 +656,25 @@ export function makeCommandCodeAdapter(
             method: type,
             raw,
           });
+          if (isCommandCodeAgentTool(toolName)) {
+            yield* emit({
+              type: "task.completed",
+              threadId: context.threadId,
+              turnId,
+              payload: {
+                taskId: RuntimeTaskId.make(toolCallId),
+                taskType: "subagent",
+                title: toolName,
+                role: "general",
+                toolUseId: toolCallId,
+                timelineBypass: true,
+                status: "failed",
+                summary: reason,
+              },
+              method: type,
+              raw,
+            });
+          }
           yield* emit({
             type: "item.completed",
             threadId: context.threadId,
@@ -501,6 +704,9 @@ export function makeCommandCodeAdapter(
                   ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
                   ...(usage.cachedInputTokens !== undefined
                     ? { cachedInputTokens: usage.cachedInputTokens }
+                    : {}),
+                  ...(usage.cacheCreationTokens !== undefined
+                    ? { cacheCreationTokens: usage.cacheCreationTokens }
                     : {}),
                   ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
                   ...(usage.reasoningOutputTokens !== undefined
@@ -753,7 +959,9 @@ export function makeCommandCodeAdapter(
                 payload: {
                   message:
                     stringValue(result?.error) ??
-                    (stderr.value.trim() || `CommandCode exited with code ${exitCode}.`),
+                    (stderr.value.trim() ||
+                      commandCodeExitReason(exitCode) ||
+                      `CommandCode exited with code ${exitCode}.`),
                   class: "provider_error",
                 },
               });

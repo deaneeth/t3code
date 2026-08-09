@@ -2,12 +2,22 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   readCommandCodeSessionId,
+  commandCodeExitReason,
+  extractCommandCodeTodoPlan,
+  isCommandCodeAgentTool,
   resultStopState,
   runtimeModeArgs,
   usageSnapshot,
 } from "./CommandCodeAdapter.ts";
 
 describe("CommandCode adapter protocol helpers", () => {
+  describe("commandCodeExitReason", () => {
+    it("turns documented headless failures into actionable messages", () => {
+      expect(commandCodeExitReason(5)).toContain("usage limit");
+      expect(commandCodeExitReason(10)).toContain("insufficient credits");
+      expect(commandCodeExitReason(42)).toBeUndefined();
+    });
+  });
   describe("readCommandCodeSessionId", () => {
     it("accepts only usable resume cursor shapes", () => {
       expect(readCommandCodeSessionId(" session-123 ")).toBe("session-123");
@@ -131,6 +141,23 @@ describe("CommandCode adapter protocol helpers", () => {
       });
     });
 
+    it("maps CommandCode cache read/write fields and includes them in the total", () => {
+      expect(
+        usageSnapshot({
+          inputTokens: 10,
+          cacheReadTokens: 4,
+          cacheWriteTokens: 2,
+          outputTokens: 3,
+        }),
+      ).toEqual({
+        totalTokens: 19,
+        inputTokens: 10,
+        cachedInputTokens: 4,
+        cacheCreationTokens: 2,
+        outputTokens: 3,
+      });
+    });
+
     it("accepts fractional token counts", () => {
       expect(usageSnapshot({ totalTokens: 10.5, inputTokens: 4.5, outputTokens: 6 })).toEqual({
         totalTokens: 10.5,
@@ -180,5 +207,38 @@ describe("CommandCode adapter protocol helpers", () => {
       expect(usageSnapshot("string")).toBeUndefined();
       expect(usageSnapshot([])).toBeUndefined();
     });
+  });
+
+  describe("extractCommandCodeTodoPlan", () => {
+    it("normalizes CommandCode todo_write input for the shared plan UI", () => {
+      expect(
+        extractCommandCodeTodoPlan({
+          todos: [
+            { content: "Inspect adapters", status: "completed" },
+            { title: "Add tests", status: "in_progress" },
+            { step: "Verify UI", status: "pending" },
+          ],
+        }),
+      ).toEqual([
+        { step: "Inspect adapters", status: "completed" },
+        { step: "Add tests", status: "inProgress" },
+        { step: "Verify UI", status: "pending" },
+      ]);
+    });
+
+    it("accepts JSON-stringified tool input and ignores malformed todo payloads", () => {
+      expect(extractCommandCodeTodoPlan('{"todos":[{"content":"Read docs"}]}')).toEqual([
+        { step: "Read docs", status: "pending" },
+      ]);
+      expect(extractCommandCodeTodoPlan({ todos: [] })).toBeNull();
+      expect(extractCommandCodeTodoPlan({ input: [] })).toBeNull();
+    });
+  });
+
+  it("does not mistake CommandCode's task ledger for a subagent", () => {
+    expect(isCommandCodeAgentTool("agent")).toBe(true);
+    expect(isCommandCodeAgentTool("spawn_agent")).toBe(true);
+    expect(isCommandCodeAgentTool("task_create")).toBe(false);
+    expect(isCommandCodeAgentTool("task_update")).toBe(false);
   });
 });

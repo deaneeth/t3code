@@ -59,13 +59,11 @@ const AuthJsonSchema = Schema.Struct({
 });
 
 const CreditsResponseSchema = Schema.Struct({
-  credits: Schema.optional(
-    Schema.Struct({
-      monthlyCredits: Schema.optional(Schema.Number),
-      purchasedCredits: Schema.optional(Schema.Number),
-      freeCredits: Schema.optional(Schema.Number),
-    }),
-  ),
+  credits: Schema.Struct({
+    monthlyCredits: Schema.Number,
+    purchasedCredits: Schema.Number,
+    freeCredits: Schema.Number,
+  }),
   windowLimits: Schema.optional(
     Schema.Struct({
       limited: Schema.optional(Schema.Boolean),
@@ -102,35 +100,24 @@ const SubscriptionResponseSchema = Schema.Struct({
 });
 
 const UsageResponseSchema = Schema.Struct({
-  totalCount: Schema.optional(Schema.Number),
-  totalCost: Schema.optional(Schema.Number),
-  totalTokensIn: Schema.optional(Schema.Number),
-  totalTokensOut: Schema.optional(Schema.Number),
+  totalCount: Schema.Number,
+  totalCost: Schema.Number,
+  totalTokensIn: Schema.Number,
+  totalTokensOut: Schema.Number,
 });
 
-const PLAN_DISPLAY_NAMES: Record<string, string> = {
-  "individual-go": "Go",
-  "individual-goat": "GOAT",
-  "individual-pro": "Pro",
-  "individual-pro-v1": "Pro",
-  "individual-provider": "Provider",
-  "individual-max": "Max",
-  "individual-ultra": "Ultra",
-  "teams-pro": "Teams Pro",
-};
-
-const PLAN_MONTHLY_CREDITS: Record<string, number> = {
-  "individual-go": 10,
-  "individual-goat": 70,
-  "individual-pro": 30,
-  "individual-pro-v1": 80,
-  "individual-provider": 15,
-  "individual-max": 150,
-  "individual-ultra": 300,
-  "teams-pro": 40,
-};
+function formatPlanName(planId: string): string {
+  if (!planId || planId === "unknown") return "Command Code";
+  const withoutPrefix = planId.replace(/^(?:individual|teams)-/u, "");
+  return withoutPrefix
+    .split(/[-_]/u)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 function formatResetsIn(resetAtMs: number, nowMs: number): string {
+  if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return "not active";
   const diffMs = resetAtMs - nowMs;
   if (diffMs <= 0) return "resetting soon";
 
@@ -257,19 +244,16 @@ export function fetchCommandCodeUsage(
     const planId = subscription.data?.planId ?? "unknown";
     const planStatus = subscription.data?.status ?? "unknown";
     const currentPeriodEnd = subscription.data?.currentPeriodEnd ?? "";
-    const isActive = planStatus === "active";
-
     const monthlyRemaining = Math.max(0, credits.credits?.monthlyCredits ?? 0);
     const purchasedRemaining = Math.max(0, credits.credits?.purchasedCredits ?? 0);
     const freeRemaining = Math.max(0, credits.credits?.freeCredits ?? 0);
     const totalRemaining = monthlyRemaining + purchasedRemaining + freeRemaining;
     const totalSpent = Math.max(0, usage.totalCost ?? 0);
 
-    const planMonthlyCredits = isActive ? (PLAN_MONTHLY_CREDITS[planId] ?? null) : null;
-    const totalPool =
-      planMonthlyCredits !== null
-        ? planMonthlyCredits + purchasedRemaining + freeRemaining
-        : totalSpent + totalRemaining;
+    // The API returns remaining balances and period spend. Derive the pool
+    // from those live values instead of embedding a plan-price table that can
+    // silently go stale when CommandCode adds or changes a plan.
+    const totalPool = totalSpent + totalRemaining;
     const usagePercent = totalPool > 0 ? getUsagePercent(totalSpent, totalPool) : 0;
 
     const fiveHourUsed = credits.windowLimits?.fiveHour?.used ?? 0;
@@ -289,7 +273,7 @@ export function fetchCommandCodeUsage(
     return {
       plan: {
         id: planId,
-        displayName: PLAN_DISPLAY_NAMES[planId] ?? planId,
+        displayName: formatPlanName(planId),
         status: planStatus,
         currentPeriodEnd,
         daysToRenewal: periodEndMs ? computeDaysToRenewal(periodEndMs, nowMs) : 0,

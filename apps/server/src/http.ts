@@ -3,6 +3,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  ProviderInstanceId,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
@@ -28,6 +29,8 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { OtlpTracer } from "effect/unstable/observability";
 
 import * as ServerConfig from "./config.ts";
+import * as ServerSettings from "./serverSettings.ts";
+import { expandHomePath } from "./pathExpansion.ts";
 import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -317,7 +320,39 @@ export const commandCodeUsageRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
     const path = yield* Path.Path;
-    const authJsonPath = path.join(NodeOS.homedir(), ".commandcode", "auth.json");
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    const requestedInstanceId = Option.isSome(url)
+      ? url.value.searchParams.get("instanceId")
+      : null;
+    let authJsonPath = path.join(NodeOS.homedir(), ".commandcode", "auth.json");
+    if (requestedInstanceId) {
+      const settingsService = yield* ServerSettings.ServerSettingsService;
+      const settings = yield* settingsService.getSettings.pipe(
+        Effect.catchCause(() => Effect.succeed(null)),
+      );
+      const instance = settings?.providerInstances[ProviderInstanceId.make(requestedInstanceId)];
+      // The built-in legacy instance is addressable as `commandcode` even
+      // before it is materialized into the providerInstances map.
+      if (instance && instance.driver !== "commandcode") {
+        return HttpServerResponse.jsonUnsafe(
+          { error: "The requested CommandCode provider instance is unavailable." },
+          { status: 404 },
+        );
+      }
+      if (!instance && requestedInstanceId !== "commandcode") {
+        return HttpServerResponse.jsonUnsafe(
+          { error: "The requested CommandCode provider instance is unavailable." },
+          { status: 404 },
+        );
+      }
+      const homeOverride = instance?.environment?.find(
+        (variable) => variable.name === "HOME",
+      )?.value;
+      if (homeOverride?.trim()) {
+        authJsonPath = path.join(expandHomePath(homeOverride.trim()), ".commandcode", "auth.json");
+      }
+    }
     const result = yield* fetchCommandCodeUsage(authJsonPath).pipe(
       Effect.catchTag("CommandCodeUsageError", (error) => Effect.succeed({ error: error.message })),
     );

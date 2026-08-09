@@ -7,6 +7,7 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -313,6 +314,10 @@ function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
     return "collab_agent_tool_call";
   }
   return "dynamic_tool_call";
+}
+
+function isAgentToolName(toolName: string): boolean {
+  return /(?:^|[_./-])(agent|subagent|subtask|task)(?:$|[_./-])/i.test(toolName);
 }
 
 function mapPermissionToRequestType(
@@ -902,6 +907,64 @@ export function makeOpenCodeAdapter(
             const title =
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
             const detail = detailFromToolPart(part);
+            if (isAgentToolName(part.tool)) {
+              const taskId = RuntimeTaskId.make(part.callID);
+              const stateTitle = part.state.status === "running" ? part.state.title : undefined;
+              const description = trimText(stateTitle) ?? detail ?? part.tool;
+              const taskBase = {
+                taskId,
+                taskType: "subagent",
+                title: description,
+                role: "subagent",
+                toolUseId: part.callID,
+                timelineBypass: true,
+              } as const;
+              if (part.state.status === "pending") {
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId,
+                    itemId: part.callID,
+                    createdAt: toolStateCreatedAt(part),
+                    raw: event,
+                  })),
+                  type: "task.started",
+                  payload: { ...taskBase, description },
+                });
+              } else if (part.state.status === "completed" || part.state.status === "error") {
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId,
+                    itemId: part.callID,
+                    createdAt: toolStateCreatedAt(part),
+                    raw: event,
+                  })),
+                  type: "task.completed",
+                  payload: {
+                    ...taskBase,
+                    status: part.state.status === "error" ? "failed" : "completed",
+                    ...(detail ? { summary: detail } : {}),
+                  },
+                });
+              } else {
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId,
+                    itemId: part.callID,
+                    createdAt: toolStateCreatedAt(part),
+                    raw: event,
+                  })),
+                  type: "task.progress",
+                  payload: {
+                    ...taskBase,
+                    description,
+                    ...(detail ? { summary: detail } : {}),
+                  },
+                });
+              }
+            }
             const payload = {
               itemType,
               ...(part.state.status === "error"
