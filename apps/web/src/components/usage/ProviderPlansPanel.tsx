@@ -3,7 +3,13 @@ import type {
   ServerProvider,
   ServerProviderModel,
 } from "@t3tools/contracts";
-import { AlertCircleIcon, BotIcon, CheckCircle2Icon, CircleXIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  AlertTriangleIcon,
+  BotIcon,
+  CheckCircle2Icon,
+  CircleXIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useCommandCodeUsage, type CommandCodeUsageData } from "../../hooks/useCommandCodeUsage";
@@ -33,7 +39,9 @@ export function ProviderPlansPanel({ refreshSignal = 0 }: { readonly refreshSign
         const environmentLabel =
           environments.find((environment) => environment.environmentId === environmentId)?.label ??
           config.environment.label;
-        return config.providers.map((provider) => ({ environmentId, environmentLabel, provider }));
+        return config.providers
+          .filter((provider) => provider.enabled && provider.availability !== "unavailable")
+          .map((provider) => ({ environmentId, environmentLabel, provider }));
       }),
     [environments, serverConfigs],
   );
@@ -91,8 +99,8 @@ export function ProviderPlansPanel({ refreshSignal = 0 }: { readonly refreshSign
   }
 
   return (
-    <section className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border pb-4">
         <div>
           <h2 className="text-sm font-medium text-foreground">Plans &amp; limits</h2>
           <p className="text-xs text-muted-foreground">
@@ -117,7 +125,7 @@ export function ProviderPlansPanel({ refreshSignal = 0 }: { readonly refreshSign
         </p>
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-5 lg:grid-cols-2">
         {rows.map((row) => {
           const commandCodeData =
             row.provider.instanceId === commandCodeInstanceId ? commandCodeUsage.data : null;
@@ -173,7 +181,13 @@ function ProviderPlanCard({
     provider.accentColor ?? (usageProvider ? PROVIDER_COLOR[usageProvider] : undefined);
 
   return (
-    <article className="flex min-w-0 flex-col gap-4 border border-border p-4">
+    <article
+      className={cn(
+        "group flex min-w-0 flex-col gap-5 rounded-lg border border-border/80 bg-card/20 p-5 transition-colors",
+        "hover:border-border hover:bg-card/35",
+      )}
+      style={accent ? { borderTopColor: accent } : undefined}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Mark
@@ -194,7 +208,7 @@ function ProviderPlanCard({
         <ProviderStatus status={status} label={statusText} />
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-xs">
         <ProviderDetail label="Access" value={provider.enabled ? "Active" : "Deactivated"} />
         <ProviderDetail
           label="Authentication"
@@ -253,10 +267,42 @@ function ProviderTelemetry({ limit }: { readonly limit: ProviderLimitSnapshot | 
     <div className="flex flex-col gap-3 border-t border-border/60 pt-3">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-foreground">Provider-reported limits</span>
-        <span className="text-[11px] text-muted-foreground">
+        <span
+          className={cn(
+            "text-[11px]",
+            limit.status === "rejected"
+              ? "text-red-400"
+              : limit.status === "warning"
+                ? "text-amber-400"
+                : "text-muted-foreground",
+          )}
+        >
+          {limit.status === "rejected"
+            ? "Limit reached"
+            : limit.status === "warning"
+              ? "Approaching limit"
+              : "Up to date"}
+          {" · "}
           updated {formatAge(limit.updatedAt)}
         </span>
       </div>
+      {limit.status === "warning" || limit.status === "rejected" ? (
+        <div
+          className={cn(
+            "flex items-start gap-2 rounded-md border px-2.5 py-2 text-xs",
+            limit.status === "rejected"
+              ? "border-red-500/30 bg-red-500/5 text-red-300"
+              : "border-amber-500/30 bg-amber-500/5 text-amber-200",
+          )}
+        >
+          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span>
+            {limit.status === "rejected"
+              ? "The provider reported a reached quota. New requests may be throttled until a window resets."
+              : "A provider quota is near its limit. Consider reducing usage or waiting for the reset."}
+          </span>
+        </div>
+      ) : null}
       {limit.planType ? (
         <p className="text-xs text-muted-foreground">Plan: {limit.planType}</p>
       ) : null}
@@ -333,16 +379,24 @@ function CommandCodePlanDetails({
         percentage={data.cycle.usagePercent}
         detail={`${formatUsd(data.cycle.totalSpent)} spent · ${formatUsd(data.cycle.totalRemaining)} left`}
       />
-      <QuotaBar
-        label="5-hour limit"
-        percentage={data.windowLimits.fiveHour.percentage}
-        detail={formatLiveLimit(data.windowLimits.fiveHour)}
-      />
-      <QuotaBar
-        label="Weekly limit"
-        percentage={data.windowLimits.weekly.percentage}
-        detail={formatLiveLimit(data.windowLimits.weekly)}
-      />
+      {data.windowLimits.limited ? (
+        <>
+          <QuotaBar
+            label="5-hour limit"
+            percentage={data.windowLimits.fiveHour.percentage}
+            detail={formatLiveLimit(data.windowLimits.fiveHour)}
+          />
+          <QuotaBar
+            label="Weekly limit"
+            percentage={data.windowLimits.weekly.percentage}
+            detail={formatLiveLimit(data.windowLimits.weekly)}
+          />
+        </>
+      ) : (
+        <ProviderTelemetryMessage>
+          Rolling request limits are not reported for this plan.
+        </ProviderTelemetryMessage>
+      )}
       <span className="text-[11px] text-muted-foreground">
         {data.plan.currentPeriodEnd
           ? `Renews ${formatDate(data.plan.currentPeriodEnd)}`
@@ -381,16 +435,41 @@ function QuotaBar({
   readonly detail: string;
 }) {
   const safePercentage = Math.max(0, Math.min(100, percentage));
+  const barColor =
+    safePercentage >= 80
+      ? "var(--color-red-500)"
+      : safePercentage >= 50
+        ? "var(--color-amber-500)"
+        : "var(--color-green-500)";
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">{label}</span>
         <span className="text-foreground tabular-nums">{Math.round(safePercentage)}%</span>
       </div>
-      <div className="h-1 overflow-hidden rounded-full bg-muted">
-        <div className="h-full bg-foreground" style={{ width: `${safePercentage}%` }} />
+      <div
+        className="h-1.5 overflow-hidden rounded-full bg-muted/70"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(safePercentage)}
+        aria-label={`${label} usage`}
+      >
+        <div
+          className="h-full rounded-full transition-[width,background-color] duration-500 motion-reduce:transition-none"
+          style={{ width: `${safePercentage}%`, backgroundColor: barColor }}
+        />
       </div>
       <span className="text-[11px] text-muted-foreground tabular-nums">{detail}</span>
+      {safePercentage >= 80 ? (
+        <span
+          className={
+            safePercentage >= 100 ? "text-[11px] text-red-400" : "text-[11px] text-amber-400"
+          }
+        >
+          {safePercentage >= 100 ? "Limit reached." : "Approaching limit."}
+        </span>
+      ) : null}
     </div>
   );
 }

@@ -3,7 +3,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { DailyTotals } from "../../usage/usageMerge";
 import { formatDayShort, formatTokens, formatUsd } from "../../usage/usageFormat";
-import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER } from "./usageProviders";
+import { PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER, providerColor } from "./usageProviders";
 
 const VIEW_WIDTH = 960;
 const VIEW_HEIGHT = 260;
@@ -16,6 +16,7 @@ interface UsageProviderChartProps {
   readonly days: readonly string[];
   readonly daily: readonly DailyTotals[];
   readonly metric: UsageChartMetric;
+  readonly providerColors?: Readonly<Partial<Record<UsageProviderKind, string>>>;
 }
 
 /** One day's per-provider values, shared by the paths and the hover readout. */
@@ -177,7 +178,12 @@ export function buildDayColumns(
   });
 }
 
-export function UsageProviderChart({ days, daily, metric }: UsageProviderChartProps) {
+export function UsageProviderChart({
+  days,
+  daily,
+  metric,
+  providerColors,
+}: UsageProviderChartProps) {
   const byDay = useMemo(() => new Map(daily.map((entry) => [entry.day, entry])), [daily]);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const plotRef = useRef<HTMLDivElement | null>(null);
@@ -231,7 +237,7 @@ export function UsageProviderChart({ days, daily, metric }: UsageProviderChartPr
     const ordered = [...built].sort((a, b) => b.total - a.total);
 
     return { paths: ordered, ticks: tickValues, stepX: step, toY, series: columns };
-  }, [byDay, days, metric]);
+  }, [byDay, days, metric, providerColors]);
 
   const format = metric === "tokens" ? formatTokens : formatUsd;
 
@@ -298,14 +304,19 @@ export function UsageProviderChart({ days, daily, metric }: UsageProviderChartPr
 
             {/* Fills first, then every stroke, so no series covers another's line. */}
             {paths.map(({ provider, area }) => (
-              <path key={provider} d={area} fill={PROVIDER_COLOR[provider]} fillOpacity={0.12} />
+              <path
+                key={provider}
+                d={area}
+                fill={providerColor(provider, providerColors)}
+                fillOpacity={0.12}
+              />
             ))}
             {paths.map(({ provider, line }) => (
               <path
                 key={provider}
                 d={line}
                 fill="none"
-                stroke={PROVIDER_COLOR[provider]}
+                stroke={providerColor(provider, providerColors)}
                 strokeWidth={2}
                 vectorEffect="non-scaling-stroke"
               />
@@ -376,7 +387,9 @@ export function UsageProviderChart({ days, daily, metric }: UsageProviderChartPr
   );
 }
 
-export function UsageChartLegend() {
+export function UsageChartLegend(props: {
+  readonly providerColors?: Readonly<Partial<Record<UsageProviderKind, string>>>;
+}) {
   return (
     <div className="flex items-center gap-4">
       {PROVIDER_ORDER.map((provider) => {
@@ -385,7 +398,11 @@ export function UsageChartLegend() {
         const Mark = PROVIDER_MARK[provider];
         return (
           <span key={provider} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Mark className="size-3.5 shrink-0" aria-hidden />
+            <Mark
+              className="size-3.5 shrink-0"
+              style={{ color: providerColor(provider, props.providerColors) }}
+              aria-hidden
+            />
             {PROVIDER_LABEL[provider]}
           </span>
         );

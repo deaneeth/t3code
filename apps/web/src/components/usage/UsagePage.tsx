@@ -1,8 +1,9 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 import { RefreshCwIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { cn } from "../../lib/utils";
+import { useServerConfigs } from "../../state/entities";
 import { useUsage } from "../../state/usage";
 import {
   enumerateDays,
@@ -16,7 +17,13 @@ import {
 import { ScrollArea } from "../ui/scroll-area";
 import { UsageChartLegend, UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { ProviderPlansPanel } from "./ProviderPlansPanel";
-import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER } from "./usageProviders";
+import {
+  PROVIDER_LABEL,
+  PROVIDER_MARK,
+  PROVIDER_ORDER,
+  providerColor,
+  toUsageProviderKind,
+} from "./usageProviders";
 
 const WINDOW_OPTIONS = [
   { days: 7, label: "7 days" },
@@ -31,6 +38,20 @@ export function UsagePage() {
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "day">("model");
   const [now, setNow] = useState(() => new Date());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const serverConfigs = useServerConfigs();
+  const providerColors = useMemo(() => {
+    const colors: Partial<Record<UsageProviderKind, string>> = {};
+    for (const config of serverConfigs.values()) {
+      for (const provider of config.providers) {
+        const kind = toUsageProviderKind(provider.driver);
+        if (kind && provider.accentColor && colors[kind] === undefined) {
+          colors[kind] = provider.accentColor;
+        }
+      }
+    }
+    return colors;
+  }, [serverConfigs]);
 
   // Re-evaluate the calendar window while the page remains open. The query
   // key changes exactly when the viewer crosses midnight in their zone.
@@ -73,7 +94,9 @@ export function UsagePage() {
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex flex-col gap-1">
-            <h1 className="text-2xl font-semibold text-foreground">Usage</h1>
+            <h1 className="text-2xl font-semibold text-foreground">
+              {activeTab === "plans" ? "Plans & limits" : "Usage"}
+            </h1>
             <p className="text-sm text-muted-foreground">
               {formatDayShort(usageWindow.sinceDay)} to {formatDayShort(usageWindow.untilDay)}
             </p>
@@ -129,11 +152,13 @@ export function UsagePage() {
               onClick={() => {
                 refresh();
                 setRefreshSignal((value) => value + 1);
+                setIsRefreshing(true);
+                globalThis.setTimeout(() => setIsRefreshing(false), 800);
               }}
               aria-label="Refresh usage"
-              className="rounded-md border border-border p-2 text-muted-foreground hover:text-foreground"
+              className="rounded-md border border-border p-2 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
             >
-              <RefreshCwIcon className="size-3.5" />
+              <RefreshCwIcon className={cn("size-3.5", isRefreshing && "animate-spin")} />
             </button>
           </div>
         </header>
@@ -200,7 +225,7 @@ export function UsagePage() {
                           className="h-full"
                           style={{
                             width: `${(share * 100).toFixed(1)}%`,
-                            backgroundColor: PROVIDER_COLOR[provider.provider],
+                            backgroundColor: providerColor(provider.provider, providerColors),
                           }}
                         />
                       </div>
@@ -237,10 +262,15 @@ export function UsagePage() {
                         </button>
                       ))}
                     </div>
-                    <UsageChartLegend />
+                    <UsageChartLegend providerColors={providerColors} />
                   </div>
                 </div>
-                <UsageProviderChart days={days} daily={merged.daily} metric={metric} />
+                <UsageProviderChart
+                  days={days}
+                  daily={merged.daily}
+                  metric={metric}
+                  providerColors={providerColors}
+                />
               </div>
             </section>
 
@@ -324,7 +354,11 @@ export function UsagePage() {
                           >
                             <td className="py-2 text-foreground">
                               <span className="flex items-center gap-2">
-                                <ProviderMark provider={model.provider} className="size-3.5" />
+                                <ProviderMark
+                                  provider={model.provider}
+                                  className="size-3.5"
+                                  style={{ color: providerColor(model.provider, providerColors) }}
+                                />
                                 {model.model}
                               </span>
                             </td>
@@ -422,12 +456,14 @@ export function UsagePage() {
 function ProviderMark({
   provider,
   className,
+  style,
 }: {
   readonly provider: UsageProviderKind;
   readonly className: string;
+  readonly style?: CSSProperties;
 }) {
   const Mark = PROVIDER_MARK[provider];
-  return <Mark className={cn("shrink-0", className)} aria-hidden />;
+  return <Mark className={cn("shrink-0", className)} style={style} aria-hidden />;
 }
 
 function Metric({

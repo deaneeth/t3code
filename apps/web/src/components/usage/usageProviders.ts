@@ -42,3 +42,16 @@ export const PROVIDER_MARK: Record<UsageProviderKind, Icon> = {
   opencode: OpenCodeIcon,
   commandcode: CommandCodeIcon,
 };
+
+export function toUsageProviderKind(driver: string): UsageProviderKind | null {
+  if (driver === "claudeAgent" || driver === "claude") return "claude";
+  if (driver === "codex" || driver === "opencode" || driver === "commandcode") return driver;
+  return null;
+}
+
+export function providerColor(
+  provider: UsageProviderKind,
+  configuredColors?: Readonly<Partial<Record<UsageProviderKind, string>>>,
+): string {
+  return configuredColors?.[provider] ?? PROVIDER_COLOR[provider];
+}
