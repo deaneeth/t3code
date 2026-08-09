@@ -712,7 +712,11 @@ export function createServerEnvironmentAtoms<R, E>(
     usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:usage-summary",
       tag: WS_METHODS.serverGetUsageSummary,
-      staleTimeMs: 60_000,
+      // Usage is a live dashboard. Keep the expensive transcript scan warm
+      // for a minute, but refresh mounted readers automatically so new turns
+      // appear without requiring a manual click.
+      staleTimeMs: 30_000,
+      refreshIntervalMs: 60_000,
     }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {

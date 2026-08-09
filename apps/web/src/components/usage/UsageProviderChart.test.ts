@@ -80,11 +80,14 @@ describe("buildDayColumns", () => {
   it("keeps band values absolute rather than cumulative", () => {
     // Regression: the bands were once stack offsets, which drew Claude Code
     // permanently above Codex regardless of which provider spent more.
+    // Every provider renders a band per day, zero-filled when absent.
     const [first] = buildDayColumns(days, byDay, "cost");
 
     expect(first?.bands).toEqual([
       { provider: "codex", value: 10 },
       { provider: "claude", value: 20 },
+      { provider: "opencode", value: 0 },
+      { provider: "commandcode", value: 0 },
     ]);
   });
 

@@ -1,9 +1,10 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type { UsageProviderKind, UsageSource } from "@t3tools/contracts";
 import { RefreshCwIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { cn } from "../../lib/utils";
 import { useUsage } from "../../state/usage";
+import { useCommandCodeUsage, type CommandCodeUsageData } from "../../hooks/useCommandCodeUsage";
 import {
   enumerateDays,
   formatCount,
@@ -27,15 +28,50 @@ export function UsagePage() {
   const [windowDays, setWindowDays] = useState<number>(30);
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "day">("model");
+  const [now, setNow] = useState(() => new Date());
 
-  // Recomputed only when the window length changes, so a re-render does not
-  // shift the range and refetch every environment.
-  const window = useMemo(() => makeWindow(windowDays), [windowDays]);
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  // Re-evaluate the calendar window while the page remains open. The query
+  // key changes exactly when the viewer crosses midnight in their zone.
+  useEffect(() => {
+    const interval = globalThis.setInterval(() => setNow(new Date()), 60_000);
+    return () => globalThis.clearInterval(interval);
+  }, []);
+
+  const usageWindow = useMemo(() => makeWindow(windowDays, now), [windowDays, now]);
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(usageWindow);
+  const commandCodeSources = useMemo(() => {
+    const unique = new Map<string, UsageSource>();
+    for (const environment of environments) {
+      for (const source of environment.summary?.sources ?? []) {
+        if (source.fingerprint.provider !== "commandcode" || source.status === "missing") {
+          continue;
+        }
+        const fingerprint = source.fingerprint;
+        const key = [
+          fingerprint.hostId,
+          fingerprint.provider,
+          fingerprint.resolvedHomePath,
+          fingerprint.volumeId,
+        ].join("\0");
+        if (!unique.has(key)) unique.set(key, source);
+      }
+    }
+    return [...unique.values()];
+  }, [environments]);
+  const hasCommandCode = merged.providers.some((provider) => provider.provider === "commandcode");
+  const commandCodeInstanceId =
+    commandCodeSources.length === 1 ? commandCodeSources[0]?.fingerprint.instanceId : undefined;
+  const hasAmbiguousCommandCodeUsage = commandCodeSources.length > 1;
+  const {
+    data: commandCodeUsage,
+    loading: commandCodeUsageLoading,
+    error: commandCodeUsageError,
+    refetch: refetchCommandCodeUsage,
+  } = useCommandCodeUsage(hasCommandCode && !hasAmbiguousCommandCodeUsage, commandCodeInstanceId);
 
   const days = useMemo(
-    () => enumerateDays(window.sinceDay, window.untilDay),
-    [window.sinceDay, window.untilDay],
+    () => enumerateDays(usageWindow.sinceDay, usageWindow.untilDay),
+    [usageWindow.sinceDay, usageWindow.untilDay],
   );
   const recentDays = useMemo(() => merged.daily.toReversed().slice(0, 8), [merged.daily]);
 
@@ -52,6 +88,13 @@ export function UsagePage() {
   const dailyAverage = activeDays === 0 ? 0 : merged.totalTokens / activeDays;
   const observedInput = merged.uncachedInputTokens + merged.cachedInputTokens;
   const cachedShare = observedInput === 0 ? 0 : merged.cachedInputTokens / observedInput;
+  const pricingStatuses = useMemo(
+    () =>
+      environments
+        .flatMap((environment) => (environment.summary ? [environment.summary.pricing.status] : []))
+        .filter((status, index, statuses) => statuses.indexOf(status) === index),
+    [environments],
+  );
 
   return (
     <ScrollArea className="h-full">
@@ -60,7 +103,7 @@ export function UsagePage() {
           <div className="flex flex-col gap-1">
             <h1 className="text-2xl font-semibold text-foreground">Usage</h1>
             <p className="text-sm text-muted-foreground">
-              {formatDayShort(window.sinceDay)} to {formatDayShort(window.untilDay)}
+              {formatDayShort(usageWindow.sinceDay)} to {formatDayShort(usageWindow.untilDay)}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -83,7 +126,10 @@ export function UsagePage() {
             </div>
             <button
               type="button"
-              onClick={refresh}
+              onClick={() => {
+                refresh();
+                void refetchCommandCodeUsage();
+              }}
               aria-label="Refresh usage"
               className="rounded-md border border-border p-2 text-muted-foreground hover:text-foreground"
             >
@@ -98,6 +144,15 @@ export function UsagePage() {
           staleEnvironments={merged.staleEnvironments}
           isPartial={isPartial}
         />
+
+        {hasCommandCode ? (
+          <CommandCodePlanUsage
+            data={commandCodeUsage}
+            loading={commandCodeUsageLoading}
+            error={commandCodeUsageError}
+            ambiguous={hasAmbiguousCommandCodeUsage}
+          />
+        ) : null}
 
         {isPending ? (
           <p className="py-16 text-center text-sm text-muted-foreground">
@@ -121,7 +176,13 @@ export function UsagePage() {
                   </span>
                   <span className="text-xs text-muted-foreground">
                     {metric === "cost"
-                      ? "* if billed at full API rate"
+                      ? `* API-equivalent estimate; subscription billing is not available${
+                          pricingStatuses.includes("unavailable")
+                            ? "; some models are unpriced"
+                            : pricingStatuses.includes("cached")
+                              ? "; using a cached rate table"
+                              : ""
+                        }`
                       : `Input, cache reads and output across ${formatCount(merged.sessions)} sessions.`}
                   </span>
                 </div>
@@ -339,15 +400,15 @@ export function UsagePage() {
                 <h2 className="text-sm font-medium text-foreground">Cost quality</h2>
                 <dl className="flex flex-col">
                   <QualityRow
-                    label="Provider reported"
+                    label="Provider-reported records"
                     value={formatPercent(merged.costQuality.providerReportedShare)}
                   />
                   <QualityRow
-                    label="Model priced"
+                    label="Model-priced records"
                     value={formatPercent(merged.costQuality.modelPricedShare)}
                   />
                   <QualityRow
-                    label="Unpriced"
+                    label="Unpriced records"
                     value={formatPercent(merged.costQuality.unpricedShare)}
                   />
                   <QualityRow
@@ -403,6 +464,106 @@ function QualityRow({ label, value }: { readonly label: string; readonly value: 
   );
 }
 
+function CommandCodePlanUsage({
+  data,
+  loading,
+  error,
+  ambiguous,
+}: {
+  readonly data: CommandCodeUsageData | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly ambiguous: boolean;
+}) {
+  const periodEnd = data ? new Date(data.plan.currentPeriodEnd) : null;
+  const periodEndLabel =
+    periodEnd && Number.isFinite(periodEnd.getTime())
+      ? periodEnd.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      : null;
+
+  return (
+    <section className="flex flex-col gap-3 border-y border-border py-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-medium text-foreground">CommandCode plan usage</h2>
+          <p className="text-xs text-muted-foreground">
+            Live account balances and rolling limits from CommandCode.
+          </p>
+        </div>
+        {data ? (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {data.plan.displayName} · {data.plan.status}
+            {periodEndLabel ? ` · renews ${periodEndLabel}` : ""}
+          </span>
+        ) : null}
+      </div>
+      {ambiguous ? (
+        <p className="text-xs text-muted-foreground">
+          Transcript totals include multiple CommandCode instances. Live balances are
+          instance-specific; open a chat with the relevant instance to see its current plan limits.
+        </p>
+      ) : null}
+      {loading && !data ? (
+        <p className="text-xs text-muted-foreground">Loading live usage…</p>
+      ) : null}
+      {error ? <p className="text-xs text-red-500/80">Live usage unavailable: {error}</p> : null}
+      {data ? (
+        <div className="grid gap-3 md:grid-cols-3">
+          <LiveUsageMetric
+            label="Credit cycle"
+            value={`${formatUsd(data.cycle.totalSpent)} spent · ${formatUsd(data.cycle.totalRemaining)} left`}
+            percentage={data.cycle.usagePercent}
+          />
+          <LiveUsageMetric
+            label="5-hour limit"
+            value={formatLiveLimit(data.windowLimits.fiveHour)}
+            percentage={data.windowLimits.fiveHour.percentage}
+          />
+          <LiveUsageMetric
+            label="Weekly limit"
+            value={formatLiveLimit(data.windowLimits.weekly)}
+            percentage={data.windowLimits.weekly.percentage}
+          />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function LiveUsageMetric({
+  label,
+  value,
+  percentage,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly percentage: number;
+}) {
+  const safePercentage = Math.max(0, Math.min(100, percentage));
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-xs text-muted-foreground">{label}</span>
+        <span className="text-xs font-medium tabular-nums text-foreground">
+          {Math.round(safePercentage)}%
+        </span>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-muted">
+        <div className="h-full bg-foreground" style={{ width: `${safePercentage}%` }} />
+      </div>
+      <span className="text-xs text-muted-foreground tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+function formatLiveLimit(limit: CommandCodeUsageData["windowLimits"]["weekly"]): string {
+  const cap = formatUsd(limit.cap);
+  const used = formatUsd(limit.used);
+  return limit.resetAtMs > 0
+    ? `${used} of ${cap} · ${limit.resetsIn}`
+    : `${used} of ${cap} · not active`;
+}
+
 /**
  * Says plainly when the totals are incomplete: an environment still answering,
  * one that failed, or one whose transcripts another environment already
@@ -419,16 +580,34 @@ function UsageCoverageNotice({
     label: string;
     error: string | null;
     isPending: boolean;
+    summary: {
+      sources: readonly {
+        fingerprint: { provider: UsageProviderKind; resolvedHomePath: string };
+        status: "ok" | "missing" | "partial" | "failed";
+        message: string | null;
+      }[];
+    } | null;
   }[];
   readonly duplicateSources: readonly string[];
   readonly staleEnvironments: readonly string[];
   readonly isPartial: boolean;
 }) {
   const failed = environments.filter((environment) => environment.error !== null);
+  const sourceIssues = environments.flatMap((environment) =>
+    (environment.summary?.sources ?? [])
+      .filter((source) => source.status !== "ok")
+      .map((source) => ({ environment, source })),
+  );
   const stale = environments.filter((environment) =>
     staleEnvironments.includes(environment.environmentId),
   );
-  if (failed.length === 0 && stale.length === 0 && duplicateSources.length === 0 && !isPartial) {
+  if (
+    failed.length === 0 &&
+    sourceIssues.length === 0 &&
+    stale.length === 0 &&
+    duplicateSources.length === 0 &&
+    !isPartial
+  ) {
     return null;
   }
 
@@ -437,6 +616,12 @@ function UsageCoverageNotice({
       {isPartial ? <span>Some environments are still reporting. Totals are partial.</span> : null}
       {failed.map((environment) => (
         <span key={environment.label}>{environment.label} could not report usage.</span>
+      ))}
+      {sourceIssues.map(({ environment, source }) => (
+        <span key={`${environment.label}:${source.fingerprint.provider}`}>
+          {environment.label} · {source.fingerprint.provider}: {source.message ?? source.status};
+          totals may be incomplete.
+        </span>
       ))}
       {stale.map((environment) => (
         <span key={environment.label}>

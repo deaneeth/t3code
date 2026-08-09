@@ -254,7 +254,9 @@ export function mergeUsage(
       reasoningTokens += bucket.totals.reasoningTokens;
       records += bucket.records;
       unpricedRecords += bucket.unpricedRecords;
-      if (bucket.costSource === "providerReported") providerReportedRecords += bucket.records;
+      providerReportedRecords +=
+        bucket.providerReportedRecords ??
+        (bucket.costSource === "providerReported" ? bucket.records : 0);
 
       const provider = providerAccumulator.get(bucket.provider) ?? {
         costUsd: 0,
