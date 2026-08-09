@@ -43,6 +43,7 @@ import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
+import { selectCodexTranscriptFiles } from "./usageCodexFiles.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFilesDetailed,
@@ -224,20 +225,58 @@ export const make = Effect.gen(function* () {
       readonly provider: UsageProviderKind;
       readonly dir: string;
       readonly instanceId?: string;
+      readonly codexArchive?: boolean;
+      readonly codexSharedHomePath?: string;
     }> = [];
     const seen = new Set<string>();
-    const addDir = (provider: UsageProviderKind, dir: string, instanceId?: string) => {
+    const addDir = (
+      provider: UsageProviderKind,
+      dir: string,
+      instanceId?: string,
+      codexArchive = false,
+      codexSharedHomePath?: string,
+    ) => {
       const resolved = path.resolve(dir);
       const key = `${provider}\0${resolved}`;
       if (seen.has(key)) return;
       seen.add(key);
-      dirs.push({ provider, dir: resolved, ...(instanceId ? { instanceId } : {}) });
+      dirs.push({
+        provider,
+        dir: resolved,
+        ...(instanceId ? { instanceId } : {}),
+        ...(codexArchive ? { codexArchive: true } : {}),
+        ...(codexSharedHomePath ? { codexSharedHomePath } : {}),
+      });
     };
 
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     addDir("claude", yield* resolveClaudeTranscriptDir(claudeHome), "claude");
+    if (settings.providers.claudeAgent.homePath.trim().length === 0) {
+      const alternateClaudeDir = path.join(NodeOS.homedir(), ".config", "claude", "projects");
+      if (
+        yield* fileSystem
+          .exists(alternateClaudeDir)
+          .pipe(Effect.catchCause(() => Effect.succeed(false)))
+      ) {
+        addDir("claude", alternateClaudeDir, "claude");
+      }
+    }
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
-    addDir("codex", path.join(codexLayout.sharedHomePath, "sessions"), "codex");
+    addDir(
+      "codex",
+      path.join(codexLayout.sharedHomePath, "sessions"),
+      "codex",
+      false,
+      codexLayout.sharedHomePath,
+    );
+    const archivedCodexDir = path.join(codexLayout.sharedHomePath, "archived_sessions");
+    if (
+      yield* fileSystem
+        .exists(archivedCodexDir)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)))
+    ) {
+      addDir("codex", archivedCodexDir, "codex", true, codexLayout.sharedHomePath);
+    }
 
     // OpenCode's data dir mirrors ccusage exactly: `OPENCODE_DATA_DIR` if set,
     // else the platform default at `~/.local/share/opencode`.
@@ -271,7 +310,21 @@ export const make = Effect.gen(function* () {
         const config = Schema.decodeUnknownOption(CodexSettings)(instance.config ?? {});
         if (Option.isSome(config)) {
           const layout = yield* resolveCodexHomeLayout(config.value);
-          addDir("codex", path.join(layout.sharedHomePath, "sessions"), instanceId);
+          addDir(
+            "codex",
+            path.join(layout.sharedHomePath, "sessions"),
+            instanceId,
+            false,
+            layout.sharedHomePath,
+          );
+          const archivedInstanceCodexDir = path.join(layout.sharedHomePath, "archived_sessions");
+          if (
+            yield* fileSystem
+              .exists(archivedInstanceCodexDir)
+              .pipe(Effect.catchCause(() => Effect.succeed(false)))
+          ) {
+            addDir("codex", archivedInstanceCodexDir, instanceId, true, layout.sharedHomePath);
+          }
         }
         continue;
       }
@@ -406,8 +459,9 @@ export const make = Effect.gen(function* () {
     const sources: UsageSource[] = [];
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
+    const codexActiveFiles = new Set<string>();
 
-    for (const { provider, dir, instanceId } of dirs) {
+    for (const { provider, dir, instanceId, codexArchive, codexSharedHomePath } of dirs) {
       const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
       const exists = yield* fileSystem
         .exists(dir)
@@ -437,7 +491,16 @@ export const make = Effect.gen(function* () {
         provider === "opencode"
           ? yield* Effect.promise(() => listOpenCodeSourceFilesDetailed(dir, windowStartMs))
           : yield* Effect.promise(() => listTranscriptFilesDetailed(dir, windowStartMs));
-      const files = listing.files;
+      const files =
+        provider === "codex"
+          ? selectCodexTranscriptFiles({
+              files: listing.files,
+              root: dir,
+              sharedHomePath: codexSharedHomePath ?? dir,
+              archived: codexArchive ?? false,
+              activeFiles: codexActiveFiles,
+            })
+          : listing.files;
       let scannedFiles = 0;
       let skippedFiles = 0;
       let readFailures = 0;
