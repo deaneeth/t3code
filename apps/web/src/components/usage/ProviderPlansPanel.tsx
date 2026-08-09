@@ -8,6 +8,7 @@ import {
   AlertTriangleIcon,
   BotIcon,
   CheckCircle2Icon,
+  ChevronDownIcon,
   CircleXIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -16,6 +17,7 @@ import { useCommandCodeUsage, type CommandCodeUsageData } from "../../hooks/useC
 import { useProviderLimits } from "../../hooks/useProviderLimits";
 import { cn } from "../../lib/utils";
 import { Card, CardFooter, CardHeader, CardPanel } from "../ui/card";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
 import { useEnvironments } from "../../state/environments";
 import { useServerConfigs } from "../../state/entities";
 import { usePrimaryEnvironmentId } from "../../state/environments";
@@ -236,17 +238,41 @@ function ProviderPlanCard({
         )}
       </CardPanel>
 
-      <CardFooter className="border-t border-border/60 px-5 py-4">
-        <button
-          type="button"
-          className="text-xs text-muted-foreground hover:text-foreground"
-          onClick={() => setModelsOpen((open) => !open)}
-          aria-expanded={modelsOpen}
-        >
-          {modelsOpen ? "Hide" : "Show"} {provider.models.length} available model
-          {provider.models.length === 1 ? "" : "s"}
-        </button>
-        {modelsOpen ? <ModelList models={provider.models} /> : null}
+      <CardFooter className="border-t border-border/60 px-5 py-3.5">
+        <Popover open={modelsOpen} onOpenChange={setModelsOpen}>
+          <PopoverTrigger
+            type="button"
+            className="inline-flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-expanded={modelsOpen}
+          >
+            <span className="truncate">
+              {modelsOpen ? "Hide" : "Show"} {provider.models.length} available model
+              {provider.models.length === 1 ? "" : "s"}
+            </span>
+            <ChevronDownIcon
+              className={cn("size-3.5 shrink-0 transition-transform", modelsOpen && "rotate-180")}
+              aria-hidden
+            />
+          </PopoverTrigger>
+          <PopoverPopup
+            side="top"
+            align="start"
+            sideOffset={8}
+            className="w-[min(24rem,calc(100vw-2rem))]"
+            viewportClassName="p-0"
+          >
+            <div className="p-4">
+              <PopoverTitle className="text-sm">Available models</PopoverTitle>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {provider.models.length} model{provider.models.length === 1 ? "" : "s"} reported by{" "}
+                {provider.displayName ?? provider.driver}.
+              </p>
+              <div className="mt-3 max-h-72 overflow-y-auto overscroll-contain pr-1">
+                <ModelList models={provider.models} />
+              </div>
+            </div>
+          </PopoverPopup>
+        </Popover>
       </CardFooter>
     </Card>
   );
@@ -473,14 +499,18 @@ function QuotaBar({
 
 function ModelList({ models }: { readonly models: ReadonlyArray<ServerProviderModel> }) {
   if (models.length === 0)
-    return <p className="mt-2 text-xs text-muted-foreground">No models reported.</p>;
+    return <p className="text-xs text-muted-foreground">No models reported.</p>;
   return (
-    <ul className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+    <ul className="grid gap-x-4 gap-y-1.5 text-xs text-muted-foreground sm:grid-cols-2">
       {models.map((model) => (
         <li key={model.slug} className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate">{model.name}</span>
+          <span className="min-w-0 truncate" title={model.name}>
+            {model.name}
+          </span>
           {model.isDefault ? (
-            <span className="shrink-0 text-[10px] text-foreground">default</span>
+            <span className="shrink-0 rounded bg-muted/60 px-1 py-0.5 text-[10px] text-foreground">
+              default
+            </span>
           ) : null}
         </li>
       ))}
