@@ -3,7 +3,9 @@
  *
  * The scan reads the provider CLIs' own session files rather than T3 Code's
  * orchestration projections, so usage covers turns driven outside T3 Code too.
- * This is the approach `ccusage` takes.
+ * This is the approach `ccusage` takes: Claude Code and Codex from JSONL
+ * sessions, OpenCode from its SQLite database (plus legacy message files),
+ * and CommandCode from its per-project sessions.
  *
  * Transcripts are append-only, so parsed records are memoised per file by
  * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
@@ -15,6 +17,8 @@ import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
+  ClaudeSettings,
+  CodexSettings,
   type UsageProviderKind,
   type UsageSource,
   type UsageSummary,
@@ -37,12 +41,14 @@ import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { expandHomePath } from "../pathExpansion.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
-  listTranscriptFiles,
+  listTranscriptFilesDetailed,
   readDirectoryVolumeId,
   readTranscriptRecords,
+  listOpenCodeSourceFilesDetailed,
 } from "./usageTranscriptReader.ts";
 import {
   decodeScanCache,
@@ -214,14 +220,90 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-    const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
-    const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
-    const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
+    const dirs: Array<{
+      readonly provider: UsageProviderKind;
+      readonly dir: string;
+      readonly instanceId?: string;
+    }> = [];
+    const seen = new Set<string>();
+    const addDir = (provider: UsageProviderKind, dir: string, instanceId?: string) => {
+      const resolved = path.resolve(dir);
+      const key = `${provider}\0${resolved}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      dirs.push({ provider, dir: resolved, ...(instanceId ? { instanceId } : {}) });
+    };
 
-    return [
-      { provider: "claude" as const, dir: claudeDir },
-      { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
-    ];
+    const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
+    addDir("claude", yield* resolveClaudeTranscriptDir(claudeHome), "claude");
+    const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
+    addDir("codex", path.join(codexLayout.sharedHomePath, "sessions"), "codex");
+
+    // OpenCode's data dir mirrors ccusage exactly: `OPENCODE_DATA_DIR` if set,
+    // else the platform default at `~/.local/share/opencode`.
+    const openCodeDataDirs =
+      process.env.OPENCODE_DATA_DIR?.split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0) ?? [];
+    addDir(
+      "opencode",
+      openCodeDataDirs[0] ?? path.join(NodeOS.homedir(), ".local", "share", "opencode"),
+      "opencode",
+    );
+    for (const dataDir of openCodeDataDirs.slice(1))
+      addDir("opencode", expandHomePath(dataDir), "opencode");
+    const commandCodeDefaultDir = path.join(NodeOS.homedir(), ".commandcode", "projects");
+    addDir("commandcode", commandCodeDefaultDir, "commandcode");
+
+    // The provider-instance registry can run more than one home/data
+    // directory at once. Usage must scan those locations too, otherwise the
+    // UI silently under-reports a configured work or account instance.
+    for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+      if (instance.driver === "claude") {
+        const config = Schema.decodeUnknownOption(ClaudeSettings)(instance.config ?? {});
+        if (Option.isSome(config)) {
+          const home = yield* resolveClaudeHomePath(config.value);
+          addDir("claude", yield* resolveClaudeTranscriptDir(home), instanceId);
+        }
+        continue;
+      }
+      if (instance.driver === "codex") {
+        const config = Schema.decodeUnknownOption(CodexSettings)(instance.config ?? {});
+        if (Option.isSome(config)) {
+          const layout = yield* resolveCodexHomeLayout(config.value);
+          addDir("codex", path.join(layout.sharedHomePath, "sessions"), instanceId);
+        }
+        continue;
+      }
+      if (instance.driver === "opencode") {
+        const instanceEnv = new Map(
+          (instance.environment ?? []).map((variable) => [variable.name, variable.value]),
+        );
+        const configured = instanceEnv.get("OPENCODE_DATA_DIR") ?? "";
+        const dataDirs = configured
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0);
+        for (const dataDir of dataDirs) addDir("opencode", expandHomePath(dataDir), instanceId);
+        continue;
+      }
+      if (instance.driver === "commandcode") {
+        // CommandCode stores sessions below $HOME/.commandcode. The driver
+        // can override HOME per instance, so include that isolated store.
+        const instanceHome = instance.environment?.find(
+          (variable) => variable.name === "HOME",
+        )?.value;
+        if (instanceHome && instanceHome.trim().length > 0) {
+          addDir(
+            "commandcode",
+            path.join(expandHomePath(instanceHome.trim()), ".commandcode", "projects"),
+            instanceId,
+          );
+        }
+      }
+    }
+
+    return dirs;
   });
 
   /**
@@ -325,7 +407,7 @@ export const make = Effect.gen(function* () {
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
 
-    for (const { provider, dir } of dirs) {
+    for (const { provider, dir, instanceId } of dirs) {
       const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
       const exists = yield* fileSystem
         .exists(dir)
@@ -333,7 +415,13 @@ export const make = Effect.gen(function* () {
 
       if (!exists) {
         sources.push({
-          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+          fingerprint: {
+            hostId,
+            provider,
+            ...(instanceId ? { instanceId } : {}),
+            resolvedHomePath: dir,
+            volumeId,
+          },
           status: "missing",
           scannedFiles: 0,
           skippedFiles: 0,
@@ -345,9 +433,14 @@ export const make = Effect.gen(function* () {
       }
 
       walkedRoots.push(dir);
-      const files = yield* Effect.promise(() => listTranscriptFiles(dir, windowStartMs));
+      const listing =
+        provider === "opencode"
+          ? yield* Effect.promise(() => listOpenCodeSourceFilesDetailed(dir, windowStartMs))
+          : yield* Effect.promise(() => listTranscriptFilesDetailed(dir, windowStartMs));
+      const files = listing.files;
       let scannedFiles = 0;
       let skippedFiles = 0;
+      let readFailures = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
@@ -357,6 +450,13 @@ export const make = Effect.gen(function* () {
         const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
         if (records.length === 0) {
           skippedFiles += 1;
+          // An empty file and an unreadable file are not equivalent. The
+          // latter must be visible to the caller instead of looking like a
+          // legitimate zero-usage source.
+          const cached = fileCache.get(file.path);
+          if (!cached || cached.size !== file.size || cached.mtimeMs !== file.mtimeMs) {
+            readFailures += 1;
+          }
           continue;
         }
         scannedFiles += 1;
@@ -370,13 +470,23 @@ export const make = Effect.gen(function* () {
       }
 
       sources.push({
-        fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-        status: "ok",
+        fingerprint: {
+          hostId,
+          provider,
+          ...(instanceId ? { instanceId } : {}),
+          resolvedHomePath: dir,
+          volumeId,
+        },
+        status:
+          readFailures > 0 || listing.hadErrors ? (scannedFiles > 0 ? "partial" : "failed") : "ok",
         scannedFiles,
         skippedFiles,
         malformedRecords: 0,
         distinctSessions: sessionIds.size,
-        message: null,
+        message:
+          readFailures > 0 || listing.hadErrors
+            ? "One or more transcript files could not be read completely."
+            : null,
       });
     }
 

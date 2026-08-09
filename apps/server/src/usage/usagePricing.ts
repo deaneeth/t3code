@@ -35,7 +35,7 @@ interface LiteLlmEntry {
 }
 
 function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /**
@@ -56,7 +56,10 @@ export function parseRateTable(document: unknown): RateTable {
     const output = finiteNumber(entry.output_cost_per_token);
     if (input === null || output === null) continue;
 
-    table.set(normalizeModelName(name), {
+    // Keep the provider-qualified key intact. Stripping the provider while
+    // building the table can make two providers with the same model silently
+    // inherit whichever entry happened to be visited last.
+    table.set(name.trim().toLowerCase(), {
       inputCostPerToken: input,
       outputCostPerToken: output,
       // Anthropic bills cache reads at a discount and cache writes at a
@@ -99,9 +102,10 @@ const UNPRICEABLE_MODELS = new Set([
 ]);
 
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
+  const qualified = model.trim().toLowerCase();
   const normalized = normalizeModelName(model);
   if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;
-  return table.get(normalized) ?? null;
+  return table.get(qualified) ?? table.get(normalized) ?? null;
 }
 
 export interface PricedUsage {
@@ -121,7 +125,7 @@ export function priceUsage(
   totals: UsageTokenTotals,
   reportedCostUsd: number | null,
 ): PricedUsage {
-  if (reportedCostUsd !== null && Number.isFinite(reportedCostUsd)) {
+  if (reportedCostUsd !== null && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0) {
     return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
@@ -144,5 +148,8 @@ export function priceUsage(
 export function cacheSavingsUsd(table: RateTable, model: string, totals: UsageTokenTotals): number {
   const rate = lookupRate(table, model);
   if (rate === null) return 0;
-  return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
+  return (
+    totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken) -
+    totals.cacheCreationTokens * rate.cacheCreationCostPerToken
+  );
 }

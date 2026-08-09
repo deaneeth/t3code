@@ -2,10 +2,11 @@
  * Usage reporting contract.
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`) rather than
- * relying on T3 Code's own orchestration projections, so usage stays complete
- * even for turns that were never driven through T3 Code. This mirrors the
- * approach `ccusage` takes.
+ * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
+ * OpenCode's `~/.local/share/opencode` data dir, `~/.commandcode/projects/**`
+ * `/*.jsonl`) rather than relying on T3 Code's own orchestration projections,
+ * so usage stays complete even for turns that were never driven through T3
+ * Code. This mirrors the approach `ccusage` takes.
  *
  * Environments return pre-aggregated `(day, provider, model)` buckets. Raw
  * transcript records never cross the wire.
@@ -21,9 +22,9 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 3 as const;
+export const USAGE_CONTRACT_VERSION = 4 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex"]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "opencode", "commandcode"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -90,6 +91,8 @@ export const UsageBucket = Schema.Struct({
   costSource: UsageCostSource,
   /** Distinct assistant responses, after de-duplication. */
   records: NonNegativeInt,
+  /** Records whose provider supplied the cost, including mixed buckets. */
+  providerReportedRecords: Schema.optional(NonNegativeInt),
   unpricedRecords: NonNegativeInt,
   /** Distinct transcript sessions that contributed to this cell. */
   sessions: NonNegativeInt,
@@ -106,6 +109,8 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
+  /** Provider instance that owns this source, when the server knows it. */
+  instanceId: Schema.optional(TrimmedNonEmptyString),
   resolvedHomePath: TrimmedNonEmptyString,
   /**
    * Filesystem identity of the transcript directory, as `device:inode`.

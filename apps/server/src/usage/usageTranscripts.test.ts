@@ -2,8 +2,11 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   initialCodexScanState,
+  initialCommandCodeScanState,
   parseClaudeLine,
   parseCodexLine,
+  parseCommandCodeLine,
+  parseOpenCodeMessage,
   totalTokens,
 } from "./usageTranscripts.ts";
 
@@ -133,6 +136,161 @@ describe("parseCodexLine", () => {
     expect(parseCodexLine(tokenCount(100, 0, 10, 0), state)).toBeNull();
     parseCodexLine(turnContext, state);
     expect(parseCodexLine(tokenCount(100, 0, 10, 0), state)).not.toBeNull();
+  });
+});
+
+describe("parseCommandCodeLine", () => {
+  const sessionHeader = JSON.stringify({
+    type: "session",
+    version: 3,
+    id: "2ca9f2a2-b51c-41f8-a4fb-ae9dc5d13d1c",
+    timestamp: "2026-08-07T20:27:59.456Z",
+    cwd: "/home/user/project",
+  });
+  const assistantMessage = (overrides: {
+    id?: string;
+    model?: string;
+    inputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    outputTokens?: number;
+    costUsd?: number;
+  }) =>
+    JSON.stringify({
+      type: "message",
+      id: overrides.id ?? "12030463",
+      parentId: "9f7b001b",
+      timestamp: "2026-08-07T20:28:05.858Z",
+      message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+      usage: {
+        inputTokens: 38926,
+        outputTokens: 136,
+        cacheReadTokens: 7424,
+        cacheWriteTokens: 0,
+        costUsd: 0.0055085072,
+        ...(overrides.inputTokens !== undefined && { inputTokens: overrides.inputTokens }),
+        ...(overrides.outputTokens !== undefined && { outputTokens: overrides.outputTokens }),
+        ...(overrides.cacheReadTokens !== undefined && {
+          cacheReadTokens: overrides.cacheReadTokens,
+        }),
+        ...(overrides.cacheWriteTokens !== undefined && {
+          cacheWriteTokens: overrides.cacheWriteTokens,
+        }),
+        ...(overrides.costUsd !== undefined && { costUsd: overrides.costUsd }),
+      },
+      model: overrides.model ?? "deepseek/deepseek-v4-flash",
+      effort: "high",
+    });
+
+  it("extracts provider-reported cost and tokens, model verbatim", () => {
+    const state = initialCommandCodeScanState();
+    parseCommandCodeLine(sessionHeader, state);
+    const record = parseCommandCodeLine(assistantMessage({}), state);
+
+    expect(record?.provider).toBe("commandcode");
+    expect(record?.sessionId).toBe("2ca9f2a2-b51c-41f8-a4fb-ae9dc5d13d1c");
+    expect(record?.model).toBe("deepseek/deepseek-v4-flash");
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 38926,
+      cachedInputTokens: 7424,
+      cacheCreationTokens: 0,
+      outputTokens: 136,
+      reasoningTokens: 0,
+    });
+    expect(record?.reportedCostUsd).toBe(0.0055085072);
+  });
+
+  it("drops user messages and use-empty records", () => {
+    const state = initialCommandCodeScanState();
+    parseCommandCodeLine(sessionHeader, state);
+    const user = JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-07T20:28:05.858Z",
+      message: { role: "user", content: [{ type: "text", text: "hi" }] },
+    });
+    expect(parseCommandCodeLine(user, state)).toBeNull();
+    expect(
+      parseCommandCodeLine(
+        assistantMessage({
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        }),
+        state,
+      ),
+    ).toBeNull();
+  });
+
+  it("counts records across files as unique (no dedup needed)", () => {
+    const state = initialCommandCodeScanState();
+    parseCommandCodeLine(sessionHeader, state);
+    expect(parseCommandCodeLine(assistantMessage({}), state)?.dedupeKey).toBeNull();
+  });
+});
+
+describe("parseOpenCodeMessage", () => {
+  const message = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      parentID: "msg_parent",
+      role: "assistant",
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/home/user/project", root: "/home/user/project" },
+      cost: 0,
+      tokens: {
+        total: 14456,
+        input: 12548,
+        output: 59,
+        reasoning: 58,
+        cache: { write: 0, read: 1792 },
+      },
+      modelID: "mimo-v2.5-free",
+      providerID: "opencode",
+      time: { created: 1785177361457 },
+      ...overrides,
+    });
+
+  it("parses tokens, provider/model split and session id", () => {
+    const record = parseOpenCodeMessage(JSON.parse(message()), "ses_123", "msg_456");
+
+    expect(record?.provider).toBe("opencode");
+    expect(record?.model).toBe("opencode/mimo-v2.5-free");
+    expect(record?.sessionId).toBe("ses_123");
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 12548,
+      cachedInputTokens: 1792,
+      cacheCreationTokens: 0,
+      outputTokens: 59,
+      reasoningTokens: 58,
+    });
+    // cost 0 is reported, not null - opencode writes it on every message
+    expect(record?.reportedCostUsd).toBe(0);
+  });
+
+  it("dedupes the same message seen under a legacy storage path", () => {
+    const legacy = parseOpenCodeMessage(JSON.parse(message()), "ses_01", "msg_456");
+    const db = parseOpenCodeMessage(JSON.parse(message()), "ses_01", "msg_456");
+    expect(legacy?.dedupeKey).toBe(db?.dedupeKey);
+  });
+
+  it("ignores messages with no tokens", () => {
+    expect(
+      parseOpenCodeMessage(
+        JSON.parse(message({ tokens: { total: 0, input: 0, output: 0 } })),
+        "s",
+        null,
+      ),
+    ).toBeNull();
+  });
+
+  it("accepts a missing provider id", () => {
+    const record = parseOpenCodeMessage(
+      JSON.parse(message({ providerID: undefined, modelID: "gpt-5.6" })),
+      "ses",
+      null,
+    );
+    expect(record?.model).toBe("gpt-5.6");
   });
 });
 
