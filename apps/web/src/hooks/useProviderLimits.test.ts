@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { sanitizeProviderLimitsResponse } from "./useProviderLimits";
+import { providerLimitsRetryDelay, sanitizeProviderLimitsResponse } from "./useProviderLimits";
+
+describe("providerLimitsRetryDelay", () => {
+  it("uses bounded delays for transient initial-load failures", () => {
+    expect([0, 1, 2].map(providerLimitsRetryDelay)).toEqual([1_000, 5_000, 15_000]);
+    expect(providerLimitsRetryDelay(3)).toBeNull();
+    expect(providerLimitsRetryDelay(-1)).toBeNull();
+  });
+});
 
 describe("sanitizeProviderLimitsResponse", () => {
   it("rejects incomplete responses instead of defaulting values to zero", () => {

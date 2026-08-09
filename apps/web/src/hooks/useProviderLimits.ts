@@ -2,6 +2,12 @@ import type { ProviderLimitSnapshot, ProviderLimitsResponse } from "@t3tools/con
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const POLL_INTERVAL_MS = 30_000;
+const RETRY_DELAYS_MS = [1_000, 5_000, 15_000] as const;
+
+export function providerLimitsRetryDelay(attempt: number): number | null {
+  if (!Number.isInteger(attempt) || attempt < 0 || attempt >= RETRY_DELAYS_MS.length) return null;
+  return RETRY_DELAYS_MS[attempt] ?? null;
+}
 
 function finite(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -118,6 +124,8 @@ export function useProviderLimits(enabled: boolean) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const failedAttemptsRef = useRef(0);
   const loadedRef = useRef(false);
 
   const fetchLimits = useCallback(async () => {
@@ -130,10 +138,20 @@ export function useProviderLimits(enabled: boolean) {
       const response = await fetch("/api/provider/limits", { signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       setData(sanitizeProviderLimitsResponse(await response.json()));
+      failedAttemptsRef.current = 0;
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       setData(null);
       setError(cause instanceof Error ? cause.message : String(cause));
+
+      const retryDelay = providerLimitsRetryDelay(failedAttemptsRef.current);
+      failedAttemptsRef.current += 1;
+      if (retryDelay !== null && retryTimerRef.current === null) {
+        retryTimerRef.current = globalThis.setTimeout(() => {
+          retryTimerRef.current = null;
+          void fetchLimits();
+        }, retryDelay);
+      }
     } finally {
       loadedRef.current = true;
       if (requestRef.current === controller) requestRef.current = null;
@@ -141,10 +159,24 @@ export function useProviderLimits(enabled: boolean) {
     }
   }, []);
 
+  const refetch = useCallback(() => {
+    if (retryTimerRef.current !== null) {
+      globalThis.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    failedAttemptsRef.current = 0;
+    return fetchLimits();
+  }, [fetchLimits]);
+
   useEffect(() => {
     if (!enabled) {
       requestRef.current?.abort();
       requestRef.current = null;
+      if (retryTimerRef.current !== null) {
+        globalThis.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      failedAttemptsRef.current = 0;
       loadedRef.current = false;
       setData(null);
       setError(null);
@@ -155,9 +187,13 @@ export function useProviderLimits(enabled: boolean) {
     const interval = globalThis.setInterval(() => void fetchLimits(), POLL_INTERVAL_MS);
     return () => {
       requestRef.current?.abort();
+      if (retryTimerRef.current !== null) {
+        globalThis.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       globalThis.clearInterval(interval);
     };
   }, [enabled, fetchLimits]);
 
-  return { data, loading, error, refetch: fetchLimits };
+  return { data, loading, error, refetch };
 }
