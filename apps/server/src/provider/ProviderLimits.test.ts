@@ -92,4 +92,69 @@ describe("latestProviderLimitSnapshots", () => {
 
     expect(snapshots).toEqual([]);
   });
+
+  it("normalizes Codex weekly payloads and merges Claude windows", () => {
+    const snapshots = latestProviderLimitSnapshots(
+      [provider("codex", "codex"), provider("claudeAgent", "claudeAgent")],
+      readModel([
+        {
+          modelSelection: { instanceId: "codex" },
+          activities: [
+            {
+              kind: "account.rate-limits.updated",
+              createdAt: "2026-08-09T02:00:00.000Z",
+              payload: {
+                rateLimits: {
+                  plan_type: "plus",
+                  primary: {
+                    used_percent: 5,
+                    window_minutes: 10080,
+                    resets_at: 1786836872,
+                  },
+                },
+              },
+            },
+          ],
+        },
+        {
+          modelSelection: { instanceId: "claudeAgent" },
+          activities: [
+            {
+              kind: "account.rate-limits.updated",
+              createdAt: "2026-08-09T03:00:00.000Z",
+              payload: {
+                rateLimits: {
+                  rate_limit_info: {
+                    rateLimitType: "seven_day_opus",
+                    utilization: 0.25,
+                  },
+                },
+              },
+            },
+            {
+              kind: "account.rate-limits.updated",
+              createdAt: "2026-08-09T03:01:00.000Z",
+              payload: {
+                rateLimits: {
+                  rate_limit_info: {
+                    rateLimitType: "five_hour",
+                    utilization: 0.5,
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ]),
+    );
+
+    expect(snapshots.find((snapshot) => snapshot.driver === "codex")).toMatchObject({
+      planType: "plus",
+      windows: [{ label: "Weekly", usedPercent: 5, resetsAtMs: 1786836872000 }],
+    });
+    expect(snapshots.find((snapshot) => snapshot.driver === "claudeAgent")?.windows).toEqual([
+      { label: "Weekly · Opus", usedPercent: 25, resetsAtMs: null },
+      { label: "5-hour", usedPercent: 50, resetsAtMs: null },
+    ]);
+  });
 });

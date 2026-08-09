@@ -300,7 +300,7 @@ describe("extractLatestRateLimitSnapshot", () => {
         }),
       ];
       const result = extractLatestRateLimitSnapshot(activities, "claude");
-      expect(result!.windows[0]!.label).toBe("7d");
+      expect(result!.windows[0]!.label).toBe("Weekly · Opus");
     });
 
     it("extracts seven_day_sonnet window from Claude", () => {
@@ -318,7 +318,7 @@ describe("extractLatestRateLimitSnapshot", () => {
         }),
       ];
       const result = extractLatestRateLimitSnapshot(activities, "claude");
-      expect(result!.windows[0]!.label).toBe("7d");
+      expect(result!.windows[0]!.label).toBe("Weekly · Sonnet");
     });
 
     it("determines status as rejected", () => {

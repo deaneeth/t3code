@@ -61,6 +61,12 @@ describe("parseCommandCodeModels", () => {
 
     expect(models.map(({ slug }) => slug)).toEqual(["deepseek/model", "claude-sonnet-4-6"]);
   });
+
+  it("does not expose unsupported effort choices for models without capability metadata", () => {
+    const models = parseCommandCodeModels("xiaomi/mimo-v2.5");
+
+    expect(models[0]?.capabilities?.optionDescriptors ?? []).toEqual([]);
+  });
 });
 
 describe("parseCommandCodeAuth", () => {

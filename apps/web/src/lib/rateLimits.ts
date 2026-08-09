@@ -71,8 +71,24 @@ function asCoercedNumber(value: unknown): number | null {
   return null;
 }
 
+function firstValue(input: Record<string, unknown>, ...keys: ReadonlyArray<string>): unknown {
+  for (const key of keys) {
+    if (input[key] !== undefined) return input[key];
+  }
+  return undefined;
+}
+
+function normalizeResetTimestamp(value: unknown): number | null {
+  const parsed = asCoercedNumber(value);
+  if (parsed === null) return null;
+  const integer = Math.trunc(Math.max(0, parsed));
+  return integer > 0 && integer < 1_000_000_000_000 ? integer * 1000 : integer;
+}
+
 function formatWindowLabel(windowDurationMins: number | null): string {
   if (windowDurationMins === null || windowDurationMins <= 0) return "Window";
+  if (windowDurationMins === 5 * 60) return "5-hour";
+  if (windowDurationMins === 7 * 24 * 60) return "Weekly";
   if (windowDurationMins < 60) return `${windowDurationMins}min`;
   const hours = windowDurationMins / 60;
   if (hours < 24) {
@@ -103,39 +119,51 @@ function formatClaudeWindowLabel(rateLimitType: string | null): string {
 function parseCodexRateLimits(
   rateLimits: Record<string, unknown>,
 ): Omit<ProviderRateLimitSnapshot, "updatedAt"> | null {
-  const planType = asString(rateLimits.planType);
-  const rateLimitReachedType = asString(rateLimits.rateLimitReachedType);
-  const spendControlReached = asBoolean(rateLimits.spendControlReached);
+  const planType = asString(firstValue(rateLimits, "planType", "plan_type"));
+  const rateLimitReachedType = asString(
+    firstValue(rateLimits, "rateLimitReachedType", "rate_limit_reached_type"),
+  );
+  const spendControlReached = asBoolean(
+    firstValue(rateLimits, "spendControlReached", "spend_control_reached"),
+  );
 
   // Parse windows (primary and secondary)
   const windows: RateLimitWindow[] = [];
 
   const primary = asRecord(rateLimits.primary);
   if (primary) {
-    const usedPercent = asCoercedNumber(primary.usedPercent);
+    const usedPercent = asCoercedNumber(firstValue(primary, "usedPercent", "used_percent"));
     if (usedPercent !== null) {
       // Clamp to 0-100 range for display
       const clampedPercent = Math.max(0, Math.min(100, usedPercent));
       windows.push({
         usedPercent: clampedPercent,
-        resetsAt: asFiniteNumber(primary.resetsAt),
-        windowDurationMins: asFiniteNumber(primary.windowDurationMins),
-        label: formatWindowLabel(asFiniteNumber(primary.windowDurationMins)),
+        resetsAt: normalizeResetTimestamp(firstValue(primary, "resetsAt", "resets_at")),
+        windowDurationMins: asCoercedNumber(
+          firstValue(primary, "windowDurationMins", "window_minutes"),
+        ),
+        label: formatWindowLabel(
+          asCoercedNumber(firstValue(primary, "windowDurationMins", "window_minutes")),
+        ),
       });
     }
   }
 
   const secondary = asRecord(rateLimits.secondary);
   if (secondary) {
-    const usedPercent = asCoercedNumber(secondary.usedPercent);
+    const usedPercent = asCoercedNumber(firstValue(secondary, "usedPercent", "used_percent"));
     if (usedPercent !== null) {
       // Clamp to 0-100 range for display
       const clampedPercent = Math.max(0, Math.min(100, usedPercent));
       windows.push({
         usedPercent: clampedPercent,
-        resetsAt: asFiniteNumber(secondary.resetsAt),
-        windowDurationMins: asFiniteNumber(secondary.windowDurationMins),
-        label: formatWindowLabel(asFiniteNumber(secondary.windowDurationMins)),
+        resetsAt: normalizeResetTimestamp(firstValue(secondary, "resetsAt", "resets_at")),
+        windowDurationMins: asCoercedNumber(
+          firstValue(secondary, "windowDurationMins", "window_minutes"),
+        ),
+        label: formatWindowLabel(
+          asCoercedNumber(firstValue(secondary, "windowDurationMins", "window_minutes")),
+        ),
       });
     }
   }
@@ -205,9 +233,9 @@ function parseClaudeRateLimits(
   if (!rateLimitInfo) return null;
 
   const statusRaw = asString(rateLimitInfo.status);
-  const rateLimitType = asString(rateLimitInfo.rateLimitType);
-  const utilization = asCoercedNumber(rateLimitInfo.utilization);
-  const resetsAt = asFiniteNumber(rateLimitInfo.resetsAt);
+  const rateLimitType = asString(firstValue(rateLimitInfo, "rateLimitType", "rate_limit_type"));
+  const utilization = asCoercedNumber(firstValue(rateLimitInfo, "utilization", "used_percent"));
+  const resetsAt = normalizeResetTimestamp(firstValue(rateLimitInfo, "resetsAt", "resets_at"));
 
   // Parse windows based on rateLimitType
   const windows: RateLimitWindow[] = [];
@@ -219,15 +247,24 @@ function parseClaudeRateLimits(
       usedPercent: clampedUtilization * 100,
       resetsAt,
       windowDurationMins: null, // Claude doesn't provide window duration
-      label: formatClaudeWindowLabel(rateLimitType),
+      label:
+        rateLimitType === "seven_day_opus"
+          ? "Weekly · Opus"
+          : rateLimitType === "seven_day_sonnet"
+            ? "Weekly · Sonnet"
+            : rateLimitType.startsWith("seven_day_")
+              ? `Weekly · ${rateLimitType.slice("seven_day_".length).replaceAll("_", " ")}`
+              : formatClaudeWindowLabel(rateLimitType),
     });
   }
 
   // Parse overage info if present
-  const overageStatus = asString(rateLimitInfo.overageStatus);
-  const overageResetsAt = asFiniteNumber(rateLimitInfo.overageResetsAt);
-  const isUsingOverage = asBoolean(rateLimitInfo.isUsingOverage);
-  const overageInUse = asBoolean(rateLimitInfo.overageInUse);
+  const overageStatus = asString(firstValue(rateLimitInfo, "overageStatus", "overage_status"));
+  const overageResetsAt = normalizeResetTimestamp(
+    firstValue(rateLimitInfo, "overageResetsAt", "overage_resets_at"),
+  );
+  const isUsingOverage = asBoolean(firstValue(rateLimitInfo, "isUsingOverage", "is_using_overage"));
+  const overageInUse = asBoolean(firstValue(rateLimitInfo, "overageInUse", "overage_in_use"));
 
   if (isUsingOverage || overageInUse) {
     // Add overage window if relevant
