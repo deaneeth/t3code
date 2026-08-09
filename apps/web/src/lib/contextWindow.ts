@@ -80,6 +80,7 @@ export function deriveLatestContextWindowSnapshot(
       remainingPercentage,
       inputTokens: asFiniteNumber(payload?.inputTokens),
       cachedInputTokens: asFiniteNumber(payload?.cachedInputTokens),
+      cacheCreationTokens: asFiniteNumber(payload?.cacheCreationTokens),
       outputTokens: asFiniteNumber(payload?.outputTokens),
       reasoningOutputTokens: asFiniteNumber(payload?.reasoningOutputTokens),
       lastUsedTokens: asFiniteNumber(payload?.lastUsedTokens),

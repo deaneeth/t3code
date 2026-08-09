@@ -40,6 +40,7 @@ export interface CommandCodeUsageData {
 }
 
 function formatResetsIn(resetAtMs: number): string {
+  if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return "not active";
   const now = Date.now();
   const diffMs = resetAtMs - now;
   if (diffMs <= 0) return "resetting soon";
@@ -81,10 +82,24 @@ function toFiniteString(value: unknown, fallback: string): string {
  * missing `plan`/`cycle`/`windowLimits` would crash the popover.
  */
 export function sanitizeCommandCodeResult(raw: unknown): CommandCodeUsageData {
-  const obj =
-    raw && typeof raw === "object"
-      ? (raw as Record<string, unknown>)
-      : ({} as Record<string, unknown>);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("CommandCode returned an invalid usage response");
+  }
+  const obj = raw as Record<string, unknown>;
+
+  if (
+    !obj.plan ||
+    typeof obj.plan !== "object" ||
+    Array.isArray(obj.plan) ||
+    !obj.cycle ||
+    typeof obj.cycle !== "object" ||
+    Array.isArray(obj.cycle) ||
+    !obj.windowLimits ||
+    typeof obj.windowLimits !== "object" ||
+    Array.isArray(obj.windowLimits)
+  ) {
+    throw new Error("CommandCode returned an incomplete usage response");
+  }
 
   const planRaw =
     obj.plan && typeof obj.plan === "object" ? (obj.plan as Record<string, unknown>) : {};
@@ -165,18 +180,24 @@ export function sanitizeCommandCodeResult(raw: unknown): CommandCodeUsageData {
   };
 }
 
-export function useCommandCodeUsage(enabled: boolean) {
+export function useCommandCodeUsage(enabled: boolean, instanceId?: string | null) {
   const [data, setData] = useState<CommandCodeUsageData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dataRef = useRef(data);
-  dataRef.current = data;
+  const requestRef = useRef<AbortController | null>(null);
+  const loadedRef = useRef(false);
 
   const fetchUsage = useCallback(async () => {
-    setLoading(true);
+    if (requestRef.current) return;
+    const controller = new AbortController();
+    requestRef.current = controller;
+    if (!loadedRef.current) setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/provider/commandcode/usage");
+      const query = instanceId ? `?instanceId=${encodeURIComponent(instanceId)}` : "";
+      const response = await fetch(`/api/provider/commandcode/usage${query}`, {
+        signal: controller.signal,
+      });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
@@ -187,53 +208,34 @@ export function useCommandCodeUsage(enabled: boolean) {
       setData(sanitizeCommandCodeResult(result));
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
+      setData(null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      loadedRef.current = true;
+      if (requestRef.current === controller) requestRef.current = null;
       setLoading(false);
     }
-  }, []);
+  }, [instanceId]);
 
   useEffect(() => {
     if (!enabled) {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      loadedRef.current = false;
       setData(null);
       setError(null);
+      setLoading(false);
       return;
     }
 
-    const controller = new AbortController();
-    let initialFetchDone = false;
-    const doFetch = async () => {
-      if (!initialFetchDone) setLoading(true);
-      setError(null);
-      try {
-        const response = await fetch("/api/provider/commandcode/usage", {
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        const result = await response.json();
-        if (result && typeof result === "object" && "error" in result) {
-          throw new Error(String((result as { error?: unknown }).error ?? "Unknown error"));
-        }
-        setData(sanitizeCommandCodeResult(result));
-      } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") return;
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        initialFetchDone = true;
-        setLoading(false);
-      }
-    };
-
-    doFetch();
-    const pollInterval = setInterval(doFetch, POLL_INTERVAL_MS);
+    void fetchUsage();
+    const pollInterval = setInterval(() => void fetchUsage(), POLL_INTERVAL_MS);
 
     return () => {
-      controller.abort();
+      requestRef.current?.abort();
       clearInterval(pollInterval);
     };
-  }, [enabled]);
+  }, [enabled, fetchUsage]);
 
   useEffect(() => {
     if (!enabled || !data) return;

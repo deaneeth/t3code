@@ -691,8 +691,8 @@ describe("formatRateLimitResetsIn", () => {
     expect(formatRateLimitResetsIn(null)).toBe("");
   });
 
-  it("returns 'now' for past timestamp", () => {
-    expect(formatRateLimitResetsIn(Date.now() - 1000)).toBe("now");
+  it("returns a truthful state for a past timestamp", () => {
+    expect(formatRateLimitResetsIn(Date.now() - 1000)).toBe("resetting soon");
   });
 
   it("returns minutes for short durations", () => {

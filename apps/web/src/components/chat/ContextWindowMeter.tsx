@@ -9,6 +9,7 @@ import {
   type ProviderRateLimitSnapshot,
 } from "~/lib/rateLimits";
 import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+import { useEffect, useState } from "react";
 
 const COMMANDCODE_USAGE_URL = "https://commandcode.ai/usage";
 
@@ -197,6 +198,7 @@ function ProviderRateLimitSection(props: { snapshot: ProviderRateLimitSnapshot }
 
   const reachedReason = formatRateLimitReachedReason(reachedType);
   const hasNoData = windows.length === 0 && !credits && !spendControl && !planType;
+  const reportedAge = formatRateLimitReportedAge(snapshot.updatedAt);
 
   return (
     <div className="mt-2 flex flex-col gap-2 border-t border-muted/60 pt-2">
@@ -208,6 +210,9 @@ function ProviderRateLimitSection(props: { snapshot: ProviderRateLimitSnapshot }
           <span className={`font-medium ${getStatusColor()}`}>{getStatusLabel()}</span>
         )}
       </div>
+      {reportedAge ? (
+        <div className="text-[10px] text-muted-foreground/50">Last reported {reportedAge}</div>
+      ) : null}
       {reachedReason && status === "rejected" ? (
         <div className="text-[11px] text-red-500/80">{reachedReason}</div>
       ) : null}
@@ -264,24 +269,42 @@ function ProviderRateLimitSection(props: { snapshot: ProviderRateLimitSnapshot }
   );
 }
 
+function formatRateLimitReportedAge(updatedAt: string): string | null {
+  const timestamp = Date.parse(updatedAt);
+  if (!Number.isFinite(timestamp)) return null;
+  const elapsedMs = Math.max(0, Date.now() - timestamp);
+  if (elapsedMs < 60_000) return "just now";
+  const minutes = Math.floor(elapsedMs / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
+
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   providerDisplayName?: string | null;
   providerDriverKind?: string | null;
+  providerInstanceId?: string | null;
   activities?: ReadonlyArray<OrchestrationThreadActivity> | undefined;
 }) {
-  const { usage, providerDisplayName, providerDriverKind, activities } = props;
+  const { usage, providerDisplayName, providerDriverKind, providerInstanceId, activities } = props;
   const isCommandCode = providerDriverKind === "commandcode";
   const isCodexOrClaude = providerDriverKind === "codex" || providerDriverKind === "claude";
   const {
     data: commandCodeUsage,
     loading: commandCodeLoading,
     error: commandCodeError,
-  } = useCommandCodeUsage(isCommandCode);
+  } = useCommandCodeUsage(isCommandCode, providerInstanceId);
   const rateLimits = useProviderRateLimits(
     activities ?? null,
     isCodexOrClaude ? providerDriverKind : null,
   );
+  const [, setRateLimitTick] = useState(0);
+  useEffect(() => {
+    if (!rateLimits) return;
+    const interval = globalThis.setInterval(() => setRateLimitTick((value) => value + 1), 30_000);
+    return () => globalThis.clearInterval(interval);
+  }, [rateLimits]);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -297,13 +320,19 @@ export function ContextWindowMeter(props: {
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
   const cachedInputTokens = usage.cachedInputTokens ?? 0;
+  const cacheCreationTokens = usage.cacheCreationTokens ?? 0;
   const reasoningOutputTokens = usage.reasoningOutputTokens ?? 0;
   const hasTokenBreakdown =
-    inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0 || reasoningOutputTokens > 0;
+    inputTokens > 0 ||
+    outputTokens > 0 ||
+    cachedInputTokens > 0 ||
+    cacheCreationTokens > 0 ||
+    reasoningOutputTokens > 0;
   const breakdownMax = Math.max(
     inputTokens,
     outputTokens,
     cachedInputTokens,
+    cacheCreationTokens,
     reasoningOutputTokens,
     1,
   );
@@ -424,6 +453,14 @@ export function ContextWindowMeter(props: {
                   color="var(--color-cyan-500)"
                 />
               ) : null}
+              {cacheCreationTokens > 0 ? (
+                <TokenBreakdownBar
+                  label="Cache write"
+                  value={cacheCreationTokens}
+                  maxValue={breakdownMax}
+                  color="var(--color-cyan-500)"
+                />
+              ) : null}
               {reasoningOutputTokens > 0 ? (
                 <TokenBreakdownBar
                   label="Reasoning"
@@ -469,8 +506,7 @@ export function ContextWindowMeter(props: {
                   <CommandCodeUsageBar
                     percentage={commandCodeUsage.cycle.usagePercent}
                     hasData={
-                      commandCodeUsage.cycle.totalRemaining > 0 ||
-                      commandCodeUsage.cycle.totalSpent > 0
+                      commandCodeUsage.cycle.totalPool > 0 || commandCodeUsage.cycle.totalSpent > 0
                     }
                   />
                   <div className="flex flex-col gap-1">

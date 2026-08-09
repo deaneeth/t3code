@@ -52,29 +52,11 @@ describe("sanitizeCommandCodeResult", () => {
     expect(result.windowLimits.weekly.percentage).toBe(60);
   });
 
-  it("survives a completely malformed payload without crashing", () => {
-    expect(sanitizeCommandCodeResult(null)).toEqual(
-      expect.objectContaining({
-        plan: expect.objectContaining({ displayName: "Command Code", status: "inactive" }),
-        cycle: expect.objectContaining({ totalRemaining: 0, usagePercent: 0 }),
-        windowLimits: expect.objectContaining({ limited: false }),
-      }),
-    );
-    expect(sanitizeCommandCodeResult("garbage")).toEqual(
-      expect.objectContaining({
-        plan: expect.objectContaining({ displayName: "Command Code" }),
-      }),
-    );
-    expect(sanitizeCommandCodeResult(42)).toEqual(
-      expect.objectContaining({
-        cycle: expect.objectContaining({ totalRequests: 0 }),
-      }),
-    );
-    expect(sanitizeCommandCodeResult({})).toEqual(
-      expect.objectContaining({
-        windowLimits: expect.objectContaining({ limited: false }),
-      }),
-    );
+  it("rejects a completely malformed payload instead of inventing zero usage", () => {
+    expect(() => sanitizeCommandCodeResult(null)).toThrow("invalid usage response");
+    expect(() => sanitizeCommandCodeResult("garbage")).toThrow("invalid usage response");
+    expect(() => sanitizeCommandCodeResult(42)).toThrow("invalid usage response");
+    expect(() => sanitizeCommandCodeResult({})).toThrow("incomplete usage response");
   });
 
   it("fills required defaults when plan fields are missing", () => {
@@ -103,7 +85,7 @@ describe("sanitizeCommandCodeResult", () => {
     expect(result.cycle.totalRequests).toBe(0);
     expect(result.windowLimits.fiveHour.percentage).toBe(100);
     expect(result.windowLimits.weekly.percentage).toBe(0);
-    expect(result.windowLimits.fiveHour.resetsIn).toBe("resetting soon");
+    expect(result.windowLimits.fiveHour.resetsIn).toBe("not active");
   });
 
   it("preserves declared daysToRenewal when period end is unparseable, recomputes it otherwise", () => {

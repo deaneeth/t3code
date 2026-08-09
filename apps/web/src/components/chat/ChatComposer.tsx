@@ -394,6 +394,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadProviderDisplayName: string | null;
   activeThreadProviderDriverKind: string | null;
+  activeThreadProviderInstanceId: string | null;
   activeThreadActivities: Thread["activities"] | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
@@ -423,6 +424,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
           usage={props.activeContextWindow}
           providerDisplayName={props.activeThreadProviderDisplayName}
           providerDriverKind={props.activeThreadProviderDriverKind}
+          providerInstanceId={props.activeThreadProviderInstanceId}
           activities={props.activeThreadActivities}
         />
       ) : null}
@@ -3211,6 +3213,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   activeContextWindow={activeContextWindow}
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
                   activeThreadProviderDriverKind={activeThreadProviderDriverKind}
+                  activeThreadProviderInstanceId={selectedInstanceId}
                   activeThreadActivities={activeThreadActivities}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}

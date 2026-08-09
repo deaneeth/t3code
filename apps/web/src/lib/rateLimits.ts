@@ -377,10 +377,11 @@ export function extractLatestRateLimitSnapshot(
 
 export function formatRateLimitResetsIn(resetsAt: number | null): string {
   if (resetsAt === null || !Number.isFinite(resetsAt)) return "";
+  if (resetsAt <= 0) return "not active";
   const now = Date.now();
   const diffMs = resetsAt - now;
-  if (diffMs <= 0) return "now";
-  const diffMins = Math.round(diffMs / 60_000);
+  if (diffMs <= 0) return "resetting soon";
+  const diffMins = Math.max(1, Math.ceil(diffMs / 60_000));
   if (diffMins < 60) return `${diffMins}m`;
   const hours = diffMins / 60;
   if (hours < 24) {
