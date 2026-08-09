@@ -18,6 +18,7 @@ import {
   browserApiCorsLayer,
   httpCompressionLayer,
   commandCodeUsageRouteLayer,
+  providerLimitsRouteLayer,
 } from "./http.ts";
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
@@ -444,6 +445,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
     commandCodeUsageRouteLayer,
+    providerLimitsRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
 ).pipe(

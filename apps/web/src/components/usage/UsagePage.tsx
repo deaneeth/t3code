@@ -1,10 +1,9 @@
-import type { UsageProviderKind, UsageSource } from "@t3tools/contracts";
+import type { UsageProviderKind } from "@t3tools/contracts";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { cn } from "../../lib/utils";
 import { useUsage } from "../../state/usage";
-import { useCommandCodeUsage, type CommandCodeUsageData } from "../../hooks/useCommandCodeUsage";
 import {
   enumerateDays,
   formatCount,
@@ -16,6 +15,7 @@ import {
 } from "../../usage/usageFormat";
 import { ScrollArea } from "../ui/scroll-area";
 import { UsageChartLegend, UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
+import { ProviderPlansPanel } from "./ProviderPlansPanel";
 import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER } from "./usageProviders";
 
 const WINDOW_OPTIONS = [
@@ -25,6 +25,8 @@ const WINDOW_OPTIONS = [
 ] as const;
 
 export function UsagePage() {
+  const [activeTab, setActiveTab] = useState<"usage" | "plans">("usage");
+  const [refreshSignal, setRefreshSignal] = useState(0);
   const [windowDays, setWindowDays] = useState<number>(30);
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "day">("model");
@@ -39,36 +41,6 @@ export function UsagePage() {
 
   const usageWindow = useMemo(() => makeWindow(windowDays, now), [windowDays, now]);
   const { merged, environments, isPending, isPartial, refresh } = useUsage(usageWindow);
-  const commandCodeSources = useMemo(() => {
-    const unique = new Map<string, UsageSource>();
-    for (const environment of environments) {
-      for (const source of environment.summary?.sources ?? []) {
-        if (source.fingerprint.provider !== "commandcode" || source.status === "missing") {
-          continue;
-        }
-        const fingerprint = source.fingerprint;
-        const key = [
-          fingerprint.hostId,
-          fingerprint.provider,
-          fingerprint.resolvedHomePath,
-          fingerprint.volumeId,
-        ].join("\0");
-        if (!unique.has(key)) unique.set(key, source);
-      }
-    }
-    return [...unique.values()];
-  }, [environments]);
-  const hasCommandCode = merged.providers.some((provider) => provider.provider === "commandcode");
-  const commandCodeInstanceId =
-    commandCodeSources.length === 1 ? commandCodeSources[0]?.fingerprint.instanceId : undefined;
-  const hasAmbiguousCommandCodeUsage = commandCodeSources.length > 1;
-  const {
-    data: commandCodeUsage,
-    loading: commandCodeUsageLoading,
-    error: commandCodeUsageError,
-    refetch: refetchCommandCodeUsage,
-  } = useCommandCodeUsage(hasCommandCode && !hasAmbiguousCommandCodeUsage, commandCodeInstanceId);
-
   const days = useMemo(
     () => enumerateDays(usageWindow.sinceDay, usageWindow.untilDay),
     [usageWindow.sinceDay, usageWindow.untilDay],
@@ -107,6 +79,34 @@ export function UsagePage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <div
+              className="flex overflow-hidden rounded-md border border-border"
+              role="tablist"
+              aria-label="Usage views"
+            >
+              {(
+                [
+                  ["usage", "Usage"],
+                  ["plans", "Plans & limits"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === value}
+                  onClick={() => setActiveTab(value)}
+                  className={cn(
+                    "px-3 py-1.5 text-xs",
+                    activeTab === value
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="flex overflow-hidden rounded-md border border-border">
               {WINDOW_OPTIONS.map((option) => (
                 <button
@@ -128,7 +128,7 @@ export function UsagePage() {
               type="button"
               onClick={() => {
                 refresh();
-                void refetchCommandCodeUsage();
+                setRefreshSignal((value) => value + 1);
               }}
               aria-label="Refresh usage"
               className="rounded-md border border-border p-2 text-muted-foreground hover:text-foreground"
@@ -145,16 +145,9 @@ export function UsagePage() {
           isPartial={isPartial}
         />
 
-        {hasCommandCode ? (
-          <CommandCodePlanUsage
-            data={commandCodeUsage}
-            loading={commandCodeUsageLoading}
-            error={commandCodeUsageError}
-            ambiguous={hasAmbiguousCommandCodeUsage}
-          />
-        ) : null}
-
-        {isPending ? (
+        {activeTab === "plans" ? (
+          <ProviderPlansPanel refreshSignal={refreshSignal} />
+        ) : isPending ? (
           <p className="py-16 text-center text-sm text-muted-foreground">
             Scanning provider transcripts…
           </p>
@@ -464,106 +457,6 @@ function QualityRow({ label, value }: { readonly label: string; readonly value: 
   );
 }
 
-function CommandCodePlanUsage({
-  data,
-  loading,
-  error,
-  ambiguous,
-}: {
-  readonly data: CommandCodeUsageData | null;
-  readonly loading: boolean;
-  readonly error: string | null;
-  readonly ambiguous: boolean;
-}) {
-  const periodEnd = data ? new Date(data.plan.currentPeriodEnd) : null;
-  const periodEndLabel =
-    periodEnd && Number.isFinite(periodEnd.getTime())
-      ? periodEnd.toLocaleDateString(undefined, { month: "short", day: "numeric" })
-      : null;
-
-  return (
-    <section className="flex flex-col gap-3 border-y border-border py-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <h2 className="text-sm font-medium text-foreground">CommandCode plan usage</h2>
-          <p className="text-xs text-muted-foreground">
-            Live account balances and rolling limits from CommandCode.
-          </p>
-        </div>
-        {data ? (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {data.plan.displayName} · {data.plan.status}
-            {periodEndLabel ? ` · renews ${periodEndLabel}` : ""}
-          </span>
-        ) : null}
-      </div>
-      {ambiguous ? (
-        <p className="text-xs text-muted-foreground">
-          Transcript totals include multiple CommandCode instances. Live balances are
-          instance-specific; open a chat with the relevant instance to see its current plan limits.
-        </p>
-      ) : null}
-      {loading && !data ? (
-        <p className="text-xs text-muted-foreground">Loading live usage…</p>
-      ) : null}
-      {error ? <p className="text-xs text-red-500/80">Live usage unavailable: {error}</p> : null}
-      {data ? (
-        <div className="grid gap-3 md:grid-cols-3">
-          <LiveUsageMetric
-            label="Credit cycle"
-            value={`${formatUsd(data.cycle.totalSpent)} spent · ${formatUsd(data.cycle.totalRemaining)} left`}
-            percentage={data.cycle.usagePercent}
-          />
-          <LiveUsageMetric
-            label="5-hour limit"
-            value={formatLiveLimit(data.windowLimits.fiveHour)}
-            percentage={data.windowLimits.fiveHour.percentage}
-          />
-          <LiveUsageMetric
-            label="Weekly limit"
-            value={formatLiveLimit(data.windowLimits.weekly)}
-            percentage={data.windowLimits.weekly.percentage}
-          />
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function LiveUsageMetric({
-  label,
-  value,
-  percentage,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly percentage: number;
-}) {
-  const safePercentage = Math.max(0, Math.min(100, percentage));
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="text-xs text-muted-foreground">{label}</span>
-        <span className="text-xs font-medium tabular-nums text-foreground">
-          {Math.round(safePercentage)}%
-        </span>
-      </div>
-      <div className="h-1 overflow-hidden rounded-full bg-muted">
-        <div className="h-full bg-foreground" style={{ width: `${safePercentage}%` }} />
-      </div>
-      <span className="text-xs text-muted-foreground tabular-nums">{value}</span>
-    </div>
-  );
-}
-
-function formatLiveLimit(limit: CommandCodeUsageData["windowLimits"]["weekly"]): string {
-  const cap = formatUsd(limit.cap);
-  const used = formatUsd(limit.used);
-  return limit.resetAtMs > 0
-    ? `${used} of ${cap} · ${limit.resetsIn}`
-    : `${used} of ${cap} · not active`;
-}
-
 /**
  * Says plainly when the totals are incomplete: an environment still answering,
  * one that failed, or one whose transcripts another environment already
@@ -615,16 +508,18 @@ function UsageCoverageNotice({
     <div className="flex flex-col gap-1 border border-border px-3 py-2 text-xs text-muted-foreground">
       {isPartial ? <span>Some environments are still reporting. Totals are partial.</span> : null}
       {failed.map((environment) => (
-        <span key={environment.label}>{environment.label} could not report usage.</span>
+        <span key={environment.environmentId}>{environment.label} could not report usage.</span>
       ))}
       {sourceIssues.map(({ environment, source }) => (
-        <span key={`${environment.label}:${source.fingerprint.provider}`}>
+        <span
+          key={`${environment.environmentId}:${source.fingerprint.provider}:${source.fingerprint.resolvedHomePath}`}
+        >
           {environment.label} · {source.fingerprint.provider}: {source.message ?? source.status};
           totals may be incomplete.
         </span>
       ))}
       {stale.map((environment) => (
-        <span key={environment.label}>
+        <span key={environment.environmentId}>
           {environment.label} runs an older server version and is excluded from totals.
         </span>
       ))}

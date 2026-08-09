@@ -8,6 +8,7 @@ import {
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -44,6 +45,9 @@ import {
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
 import { fetchCommandCodeUsage } from "./provider/CommandCodeUsageApi.ts";
+import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { latestProviderLimitSnapshots } from "./provider/ProviderLimits.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -361,6 +365,42 @@ export const commandCodeUsageRouteLayer = HttpRouter.add(
       return HttpServerResponse.jsonUnsafe(result, { status: 502 });
     }
     return HttpServerResponse.jsonUnsafe(result);
+  }).pipe(
+    Effect.catchTags({
+      EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+      EnvironmentInternalError: HttpServerRespondable.toResponse,
+      EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+    }),
+  ),
+);
+
+/**
+ * Returns only quota telemetry that a provider actually emitted in a T3
+ * session. Provider snapshots intentionally do not invent plan limits, so a
+ * provider without account-limit events is represented by no snapshot and the
+ * client can explain that the provider does not expose this telemetry.
+ */
+export const providerLimitsRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/provider/limits",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+    const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+    const registry = yield* ProviderRegistry.ProviderRegistry;
+    const readModel = yield* projection
+      .getSnapshot()
+      .pipe(Effect.catchCause(() => Effect.succeed(null)));
+    if (readModel === null) {
+      return HttpServerResponse.jsonUnsafe(
+        { error: "Provider limit telemetry is temporarily unavailable." },
+        { status: 503 },
+      );
+    }
+    const providers = yield* registry.getProviders;
+    return HttpServerResponse.jsonUnsafe({
+      readAt: DateTime.formatIso(yield* DateTime.now),
+      snapshots: latestProviderLimitSnapshots(providers, readModel),
+    });
   }).pipe(
     Effect.catchTags({
       EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
