@@ -415,6 +415,62 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   } satisfies CodexAppServerProviderSnapshot;
 });
 
+/**
+ * Read account-level Codex limits without opening a user thread. This uses
+ * the app-server RPC directly and owns a short-lived child process scope, so
+ * Plans & limits can show authenticated quota before the first chat turn.
+ */
+export const readCodexRateLimits = (input: {
+  readonly binaryPath: string;
+  readonly homePath?: string;
+  readonly launchArgs?: string;
+  readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv;
+}) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const environment = {
+        ...input.environment,
+        ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+      };
+      const spawnCommand = yield* resolveSpawnCommand(
+        input.binaryPath,
+        codexAppServerArgs(input.launchArgs),
+        { env: environment, extendEnv: true },
+      );
+      const child = yield* spawner
+        .spawn(
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            cwd: input.cwd,
+            env: environment,
+            extendEnv: true,
+            forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
+            shell: spawnCommand.shell,
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new CodexErrors.CodexAppServerSpawnError({
+                command: `${input.binaryPath} app-server`,
+                cause,
+              }),
+          ),
+        );
+      const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        Effect.provide(clientContext),
+      );
+
+      yield* client.request("initialize", buildCodexInitializeParams());
+      yield* client.notify("initialized", undefined);
+      const response = yield* client.request("account/rateLimits/read", undefined);
+      return response.rateLimits as Readonly<Record<string, unknown>>;
+    }),
+  );
+
 const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] => {
   const models = new Set<string>();
   for (const model of codexSettings.customModels) {

@@ -488,6 +488,12 @@ export const ProviderRegistryLive = Layer.effect(
       return yield* refreshOneSource(providerSource);
     });
 
+    const readRateLimits = Effect.fn("readRateLimits")(function* (instanceId: ProviderInstanceId) {
+      const instance = yield* instanceRegistry.getInstance(instanceId);
+      if (!instance?.adapter.readRateLimits) return null;
+      return yield* instance.adapter.readRateLimits().pipe(Effect.orElseSucceed(() => null));
+    });
+
     const refreshInstance = Effect.fn("refreshInstance")(function* (
       instanceId: ProviderInstanceId,
     ) {
@@ -709,6 +715,7 @@ export const ProviderRegistryLive = Layer.effect(
 
     return {
       getProviders: Ref.get(providersRef),
+      readRateLimits,
       refresh: (provider?: ProviderDriverKind) =>
         refresh(provider).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstance: (instanceId: ProviderInstanceId) =>

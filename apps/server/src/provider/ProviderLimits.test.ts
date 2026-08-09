@@ -2,7 +2,10 @@ import { describe, expect, it } from "@effect/vitest";
 
 import type { OrchestrationReadModel, ServerProvider } from "@t3tools/contracts";
 
-import { latestProviderLimitSnapshots } from "./ProviderLimits.ts";
+import {
+  latestProviderLimitSnapshots,
+  providerLimitSnapshotFromRateLimits,
+} from "./ProviderLimits.ts";
 
 const provider = (instanceId: string, driver: string): ServerProvider =>
   ({
@@ -23,6 +26,24 @@ const readModel = (threads: unknown[]): OrchestrationReadModel =>
   ({ threads }) as unknown as OrchestrationReadModel;
 
 describe("latestProviderLimitSnapshots", () => {
+  it("normalizes a direct Codex account quota read as provider API telemetry", () => {
+    const snapshot = providerLimitSnapshotFromRateLimits({
+      provider: provider("codex", "codex"),
+      rateLimits: {
+        planType: "plus",
+        primary: { usedPercent: 5, windowDurationMins: 10080, resetsAt: 1_786_836_872 },
+      },
+      updatedAt: "2026-08-09T04:00:00.000Z",
+      source: "provider-api",
+    });
+
+    expect(snapshot).toMatchObject({
+      driver: "codex",
+      source: "provider-api",
+      windows: [{ label: "Weekly", usedPercent: 5, resetsAtMs: 1_786_836_872_000 }],
+    });
+  });
+
   it("keeps the newest provider-reported windows per configured instance", () => {
     const snapshots = latestProviderLimitSnapshots(
       [provider("codex", "codex")],

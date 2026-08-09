@@ -232,6 +232,23 @@ function parseForDriver(
 
 type ParsedLimit = Omit<ProviderLimitSnapshot, "instanceId" | "driver" | "updatedAt" | "source">;
 
+export function providerLimitSnapshotFromRateLimits(input: {
+  readonly provider: ServerProvider;
+  readonly rateLimits: unknown;
+  readonly updatedAt: string;
+  readonly source: ProviderLimitSnapshot["source"];
+}): ProviderLimitSnapshot | null {
+  const parsed = parseForDriver(input.provider.driver, record(input.rateLimits) ?? {});
+  if (!parsed) return null;
+  return {
+    instanceId: input.provider.instanceId,
+    driver: input.provider.driver,
+    ...parsed,
+    updatedAt: input.updatedAt,
+    source: input.source,
+  };
+}
+
 function mergeParsedLimits(previous: ParsedLimit | undefined, next: ParsedLimit): ParsedLimit {
   if (!previous) return next;
   const windows = new Map(previous.windows.map((window) => [window.label, window]));
@@ -279,8 +296,20 @@ export function latestProviderLimitSnapshots(
     const payload = record(activity.payload);
     const rateLimits = record(payload?.rateLimits);
     if (!rateLimits) continue;
-    const parsed = parseForDriver(provider.driver, rateLimits);
-    if (!parsed) continue;
+    const snapshot = providerLimitSnapshotFromRateLimits({
+      provider,
+      rateLimits,
+      updatedAt: activity.createdAt,
+      source: "provider-activity",
+    });
+    if (!snapshot) continue;
+    const parsed = {
+      windows: snapshot.windows,
+      credits: snapshot.credits,
+      spendControl: snapshot.spendControl,
+      planType: snapshot.planType,
+      status: snapshot.status,
+    } satisfies ParsedLimit;
     const current = latest.get(instanceId);
     latest.set(instanceId, {
       updatedAt: activity.createdAt,

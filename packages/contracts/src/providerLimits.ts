@@ -38,7 +38,7 @@ export const ProviderLimitSnapshot = Schema.Struct({
   planType: Schema.NullOr(TrimmedNonEmptyString),
   status: Schema.NullOr(ProviderLimitStatus),
   updatedAt: IsoDateTime,
-  source: Schema.Literal("provider-activity"),
+  source: Schema.Literals(["provider-activity", "provider-api"]),
 });
 export type ProviderLimitSnapshot = typeof ProviderLimitSnapshot.Type;
 

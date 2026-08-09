@@ -47,7 +47,10 @@ import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./ht
 import { fetchCommandCodeUsage } from "./provider/CommandCodeUsageApi.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
-import { latestProviderLimitSnapshots } from "./provider/ProviderLimits.ts";
+import {
+  latestProviderLimitSnapshots,
+  providerLimitSnapshotFromRateLimits,
+} from "./provider/ProviderLimits.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -375,10 +378,9 @@ export const commandCodeUsageRouteLayer = HttpRouter.add(
 );
 
 /**
- * Returns only quota telemetry that a provider actually emitted in a T3
- * session. Provider snapshots intentionally do not invent plan limits, so a
- * provider without account-limit events is represented by no snapshot and the
- * client can explain that the provider does not expose this telemetry.
+ * Returns quota telemetry that a provider actually reported. Providers with
+ * a native account-quota read are queried through their adapter; event history
+ * remains the fallback for providers that only publish rolling updates.
  */
 export const providerLimitsRouteLayer = HttpRouter.add(
   "GET",
@@ -397,9 +399,38 @@ export const providerLimitsRouteLayer = HttpRouter.add(
       );
     }
     const providers = yield* registry.getProviders;
+    const readAt = DateTime.formatIso(yield* DateTime.now);
+    const historical = latestProviderLimitSnapshots(providers, readModel);
+    const live = yield* Effect.forEach(
+      providers.filter((provider) => provider.enabled),
+      (provider) =>
+        registry.readRateLimits
+          ? registry.readRateLimits(provider.instanceId).pipe(
+              Effect.map((rateLimits) =>
+                rateLimits === null
+                  ? null
+                  : providerLimitSnapshotFromRateLimits({
+                      provider,
+                      rateLimits,
+                      updatedAt: readAt,
+                      source: "provider-api",
+                    }),
+              ),
+            )
+          : Effect.succeed(null),
+      { concurrency: 4 },
+    );
+    const snapshotsByInstance = new Map(
+      historical.map((snapshot) => [snapshot.instanceId, snapshot]),
+    );
+    for (const snapshot of live) {
+      if (snapshot) snapshotsByInstance.set(snapshot.instanceId, snapshot);
+    }
     return HttpServerResponse.jsonUnsafe({
-      readAt: DateTime.formatIso(yield* DateTime.now),
-      snapshots: latestProviderLimitSnapshots(providers, readModel),
+      readAt,
+      snapshots: [...snapshotsByInstance.values()].toSorted((a, b) =>
+        a.instanceId.localeCompare(b.instanceId),
+      ),
     });
   }).pipe(
     Effect.catchTags({

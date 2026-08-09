@@ -76,6 +76,11 @@ const PROVIDER = ProviderDriverKind.make("codex");
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  /** Provider-native account quota read used when no chat session is active. */
+  readonly readRateLimits?: () => Effect.Effect<
+    Readonly<Record<string, unknown>>,
+    ProviderAdapterError
+  >;
   readonly makeRuntime?: (
     options: CodexSessionRuntimeOptions,
   ) => Effect.Effect<
@@ -1639,6 +1644,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       : undefined);
   const managedNativeEventLogger =
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
+  const directRateLimitsReader = options?.readRateLimits;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
@@ -1841,6 +1847,40 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return session;
   });
 
+  const readActiveSessionRateLimits: NonNullable<CodexAdapterShape["readRateLimits"]> = () => {
+    const session = Array.from(sessions.values()).find((candidate) => !candidate.stopped);
+    if (!session) {
+      return Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "account/rateLimits/read",
+          detail: "No active Codex session is available for an account quota read.",
+        }),
+      );
+    }
+    if (!session.runtime.readRateLimits) {
+      return Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "account/rateLimits/read",
+          detail: "The Codex runtime does not support account quota reads.",
+        }),
+      );
+    }
+    return session.runtime.readRateLimits().pipe(
+      Effect.mapError((cause) =>
+        mapCodexRuntimeError(session.threadId, "account/rateLimits/read", cause),
+      ),
+      Effect.map((response) => response.rateLimits as Readonly<Record<string, unknown>>),
+    );
+  };
+  const readRateLimits: NonNullable<CodexAdapterShape["readRateLimits"]> = () => {
+    if (Array.from(sessions.values()).some((candidate) => !candidate.stopped)) {
+      return readActiveSessionRateLimits();
+    }
+    return directRateLimitsReader ? directRateLimitsReader() : readActiveSessionRateLimits();
+  };
+
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
@@ -1979,6 +2019,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     rollbackThread,
     respondToRequest,
     respondToUserInput,
+    readRateLimits,
     stopSession,
     listSessions,
     hasSession,

@@ -27,6 +27,11 @@ export interface ProviderRegistryShape {
    */
   readonly getProviders: Effect.Effect<ReadonlyArray<ServerProvider>>;
 
+  /** Read native account quota data when the materialized provider supports it. */
+  readonly readRateLimits?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<Readonly<Record<string, unknown>> | null>;
+
   /**
    * Refresh all providers, or the default instance of the specified
    * kind when supplied.

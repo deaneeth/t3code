@@ -102,6 +102,13 @@ export interface ProviderAdapterShape<TError> {
   readonly hasSession: (threadId: ThreadId) => Effect.Effect<boolean>;
 
   /**
+   * Read account-level quota data from the provider when its protocol
+   * supports it. Providers without a native account-quota endpoint should
+   * omit this method and rely on their emitted activity events instead.
+   */
+  readonly readRateLimits?: () => Effect.Effect<Readonly<Record<string, unknown>>, TError>;
+
+  /**
    * Read a provider thread snapshot.
    */
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
