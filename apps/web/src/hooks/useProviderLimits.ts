@@ -22,7 +22,13 @@ function sanitizeSnapshot(value: unknown): ProviderLimitSnapshot | null {
   const instanceId = stringValue(raw.instanceId);
   const driver = stringValue(raw.driver);
   const updatedAt = stringValue(raw.updatedAt);
-  if (!instanceId || !driver || !updatedAt || raw.source !== "provider-activity") return null;
+  if (
+    !instanceId ||
+    !driver ||
+    !updatedAt ||
+    (raw.source !== "provider-activity" && raw.source !== "provider-api")
+  )
+    return null;
 
   const windows = Array.isArray(raw.windows)
     ? raw.windows.flatMap((window) => {
@@ -85,7 +91,7 @@ function sanitizeSnapshot(value: unknown): ProviderLimitSnapshot | null {
     planType,
     status,
     updatedAt,
-    source: "provider-activity",
+    source: raw.source,
   } as unknown as ProviderLimitSnapshot;
 }
 

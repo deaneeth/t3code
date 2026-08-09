@@ -1,9 +1,15 @@
 import { describe, it, expect } from "vite-plus/test";
-import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type OrchestrationThreadActivity,
+  type ProviderLimitSnapshot,
+} from "@t3tools/contracts";
 import {
   extractLatestRateLimitSnapshot,
   formatRateLimitReachedReason,
   formatRateLimitResetsIn,
+  toProviderRateLimitSnapshot,
 } from "~/lib/rateLimits";
 
 function makeActivity(
@@ -682,6 +688,35 @@ describe("extractLatestRateLimitSnapshot", () => {
         }),
       ];
       expect(extractLatestRateLimitSnapshot(activities, "claude")).toBeNull();
+    });
+  });
+});
+
+describe("toProviderRateLimitSnapshot", () => {
+  it("keeps provider API weekly quota data available to the chat popup", () => {
+    const snapshot = {
+      instanceId: ProviderInstanceId.make("codex"),
+      driver: ProviderDriverKind.make("codex"),
+      windows: [{ label: "Weekly", usedPercent: 7, resetsAtMs: 1_800_000_000_000 }],
+      credits: { balance: "0", hasCredits: false, unlimited: false },
+      spendControl: null,
+      planType: "plus",
+      status: "allowed",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      source: "provider-api",
+    } satisfies ProviderLimitSnapshot;
+
+    expect(toProviderRateLimitSnapshot(snapshot)).toMatchObject({
+      provider: "codex",
+      planType: "plus",
+      windows: [
+        {
+          label: "Weekly",
+          usedPercent: 7,
+          windowDurationMins: 10080,
+          resetsAt: 1_800_000_000_000,
+        },
+      ],
     });
   });
 });

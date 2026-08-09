@@ -946,8 +946,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const entry = providerStatuses.find(
       (p) => p.instanceId === activeThreadModelSelection.instanceId,
     );
-    return entry?.driver ?? null;
-  }, [providerStatuses, activeThreadModelSelection]);
+    return (
+      entry?.driver ??
+      providerInstanceEntries.find(
+        (candidate) => candidate.instanceId === activeThreadModelSelection.instanceId,
+      )?.driverKind ??
+      null
+    );
+  }, [activeThreadModelSelection, providerInstanceEntries, providerStatuses]);
 
   // ------------------------------------------------------------------
   // Composer-local state

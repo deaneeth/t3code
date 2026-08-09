@@ -1,4 +1,4 @@
-import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+import type { OrchestrationThreadActivity, ProviderLimitSnapshot } from "@t3tools/contracts";
 
 // ── Normalized Types ────────────────────────────────────────────────
 
@@ -32,6 +32,42 @@ export type ProviderRateLimitSnapshot = {
   readonly reachedType: string | null;
   readonly updatedAt: string;
 };
+
+/** Convert the shared server snapshot into the popup's provider-neutral shape. */
+export function toProviderRateLimitSnapshot(
+  snapshot: ProviderLimitSnapshot,
+): ProviderRateLimitSnapshot {
+  const provider = snapshot.driver === "claudeAgent" ? "claude" : snapshot.driver;
+  return {
+    provider,
+    windows: snapshot.windows.map((window) => ({
+      usedPercent: window.usedPercent,
+      resetsAt: window.resetsAtMs,
+      windowDurationMins:
+        window.label === "5-hour" || window.label === "5hr"
+          ? 5 * 60
+          : window.label === "Weekly" ||
+              window.label.startsWith("Weekly ·") ||
+              window.label === "7d"
+            ? 7 * 24 * 60
+            : null,
+      label: window.label,
+    })),
+    credits: snapshot.credits,
+    spendControl: snapshot.spendControl
+      ? {
+          limit: snapshot.spendControl.limit,
+          used: snapshot.spendControl.used,
+          remainingPercent: snapshot.spendControl.remainingPercent,
+          resetsAt: snapshot.spendControl.resetsAtMs,
+        }
+      : null,
+    planType: snapshot.planType,
+    status: snapshot.status,
+    reachedType: null,
+    updatedAt: snapshot.updatedAt,
+  };
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 

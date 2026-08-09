@@ -14,14 +14,15 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { useCommandCodeUsage, type CommandCodeUsageData } from "../../hooks/useCommandCodeUsage";
 import { useProviderLimits } from "../../hooks/useProviderLimits";
-import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK } from "./usageProviders";
 import { cn } from "../../lib/utils";
+import { Card, CardFooter, CardHeader, CardPanel } from "../ui/card";
 import { useEnvironments } from "../../state/environments";
 import { useServerConfigs } from "../../state/entities";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatTokens } from "../../usage/usageFormat";
+import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK } from "./usageProviders";
 
 type ProviderRow = {
   readonly environmentId: string;
@@ -181,14 +182,8 @@ function ProviderPlanCard({
     provider.accentColor ?? (usageProvider ? PROVIDER_COLOR[usageProvider] : undefined);
 
   return (
-    <article
-      className={cn(
-        "group flex min-w-0 flex-col gap-5 rounded-lg border border-border/80 bg-card/20 p-5 transition-colors",
-        "hover:border-border hover:bg-card/35",
-      )}
-      style={accent ? { borderTopColor: accent } : undefined}
-    >
-      <div className="flex items-start justify-between gap-3">
+    <Card className="min-w-0 gap-0 overflow-hidden rounded-xl border-border/80 bg-card/30 shadow-none">
+      <CardHeader className="flex grid-cols-none grid-rows-none flex-row items-start justify-between gap-3 p-5 pb-4">
         <div className="flex min-w-0 items-center gap-2">
           <Mark
             className="size-4 shrink-0"
@@ -206,40 +201,42 @@ function ProviderPlanCard({
           </div>
         </div>
         <ProviderStatus status={status} label={statusText} />
-      </div>
+      </CardHeader>
 
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-xs">
-        <ProviderDetail label="Access" value={provider.enabled ? "Active" : "Deactivated"} />
-        <ProviderDetail
-          label="Authentication"
-          value={provider.auth.label ?? provider.auth.type ?? provider.auth.status}
-        />
-        <ProviderDetail label="Version" value={provider.version ?? "Not reported"} />
-        <ProviderDetail label="Models" value={`${provider.models.length}`} />
-        {provider.auth.email ? (
-          <ProviderDetail label="Account" value={provider.auth.email} />
+      <CardPanel className="flex flex-col gap-5 px-5 pb-5 pt-0">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-xs">
+          <ProviderDetail label="Access" value={provider.enabled ? "Active" : "Deactivated"} />
+          <ProviderDetail
+            label="Authentication"
+            value={provider.auth.label ?? provider.auth.type ?? provider.auth.status}
+          />
+          <ProviderDetail label="Version" value={provider.version ?? "Not reported"} />
+          <ProviderDetail label="Models" value={`${provider.models.length}`} />
+          {provider.auth.email ? (
+            <ProviderDetail label="Account" value={provider.auth.email} />
+          ) : null}
+          <ProviderDetail label="Checked" value={formatDate(provider.checkedAt)} />
+        </dl>
+
+        {provider.message || provider.unavailableReason ? (
+          <p className="rounded-lg border border-border/60 bg-muted/10 px-3 py-2.5 text-xs text-muted-foreground">
+            {provider.unavailableReason ?? provider.message}
+          </p>
         ) : null}
-        <ProviderDetail label="Checked" value={formatDate(provider.checkedAt)} />
-      </dl>
 
-      {provider.message || provider.unavailableReason ? (
-        <p className="border border-border/60 px-2.5 py-2 text-xs text-muted-foreground">
-          {provider.unavailableReason ?? provider.message}
-        </p>
-      ) : null}
+        {provider.driver === "commandcode" ? (
+          <CommandCodePlanDetails
+            data={commandCodeData}
+            loading={commandCodeLoading}
+            error={commandCodeError}
+            ambiguous={commandCodeAmbiguous}
+          />
+        ) : (
+          <ProviderTelemetry limit={limit} />
+        )}
+      </CardPanel>
 
-      {provider.driver === "commandcode" ? (
-        <CommandCodePlanDetails
-          data={commandCodeData}
-          loading={commandCodeLoading}
-          error={commandCodeError}
-          ambiguous={commandCodeAmbiguous}
-        />
-      ) : (
-        <ProviderTelemetry limit={limit} />
-      )}
-
-      <div className="border-t border-border/60 pt-3">
+      <CardFooter className="border-t border-border/60 px-5 py-4">
         <button
           type="button"
           className="text-xs text-muted-foreground hover:text-foreground"
@@ -250,8 +247,8 @@ function ProviderPlanCard({
           {provider.models.length === 1 ? "" : "s"}
         </button>
         {modelsOpen ? <ModelList models={provider.models} /> : null}
-      </div>
-    </article>
+      </CardFooter>
+    </Card>
   );
 }
 

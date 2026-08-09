@@ -2,14 +2,16 @@ import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { useCommandCodeUsage } from "~/hooks/useCommandCodeUsage";
+import { useProviderLimits } from "~/hooks/useProviderLimits";
 import { useProviderRateLimits } from "~/hooks/useProviderRateLimits";
 import {
   formatRateLimitReachedReason,
   formatRateLimitResetsIn,
+  toProviderRateLimitSnapshot,
   type ProviderRateLimitSnapshot,
 } from "~/lib/rateLimits";
 import type { OrchestrationThreadActivity } from "@t3tools/contracts";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const COMMANDCODE_USAGE_URL = "https://commandcode.ai/usage";
 
@@ -299,12 +301,24 @@ export function ContextWindowMeter(props: {
     activities ?? null,
     isCodexOrClaude ? providerDriverKind : null,
   );
+  const { data: providerLimits } = useProviderLimits(isCodexOrClaude);
+  const liveRateLimits = useMemo(() => {
+    if (!providerLimits) return null;
+    const snapshot = providerLimits.snapshots.find(
+      (candidate) =>
+        (candidate.instanceId === providerInstanceId || !providerInstanceId) &&
+        (candidate.driver === providerDriverKind ||
+          (providerDriverKind === "claude" && candidate.driver === "claudeAgent")),
+    );
+    return snapshot ? toProviderRateLimitSnapshot(snapshot) : null;
+  }, [providerDriverKind, providerInstanceId, providerLimits]);
+  const effectiveRateLimits = liveRateLimits ?? rateLimits;
   const [, setRateLimitTick] = useState(0);
   useEffect(() => {
-    if (!rateLimits) return;
+    if (!effectiveRateLimits) return;
     const interval = globalThis.setInterval(() => setRateLimitTick((value) => value + 1), 30_000);
     return () => globalThis.clearInterval(interval);
-  }, [rateLimits]);
+  }, [effectiveRateLimits]);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -573,7 +587,9 @@ export function ContextWindowMeter(props: {
               </svg>
             </a>
           ) : null}
-          {rateLimits && !isCommandCode ? <ProviderRateLimitSection snapshot={rateLimits} /> : null}
+          {effectiveRateLimits && !isCommandCode ? (
+            <ProviderRateLimitSection snapshot={effectiveRateLimits} />
+          ) : null}
         </div>
       </PopoverPopup>
     </Popover>
