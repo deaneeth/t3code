@@ -5,6 +5,8 @@ import {
   CursorSettings,
   GrokSettings,
   OpenCodeSettings,
+  ApiProviderSettings,
+  API_PROVIDER_PROFILE_OPTIONS as CONTRACT_API_PROVIDER_PROFILE_OPTIONS,
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import type * as Schema from "effect/Schema";
@@ -82,6 +84,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     icon: CommandCodeIcon,
     settingsSchema: CommandCodeSettings,
   },
+  {
+    value: ProviderDriverKind.make("api"),
+    label: "API Provider",
+    icon: OpenAI,
+    settingsSchema: ApiProviderSettings,
+  },
 ];
 
 export const PROVIDER_CLIENT_DEFINITION_BY_VALUE: Partial<
@@ -93,6 +101,28 @@ export const PROVIDER_CLIENT_DEFINITION_BY_VALUE: Partial<
 export const DRIVER_OPTIONS = PROVIDER_CLIENT_DEFINITIONS;
 export const DRIVER_OPTION_BY_VALUE = PROVIDER_CLIENT_DEFINITION_BY_VALUE;
 export type DriverOption = ProviderClientDefinition;
+
+export const API_PROVIDER_PROFILE_OPTIONS = CONTRACT_API_PROVIDER_PROFILE_OPTIONS;
+
+export function resolveApiProfileId(input: {
+  readonly profileId: string | undefined;
+  readonly baseUrl: string | undefined;
+}): string {
+  let hostname = "";
+  try {
+    hostname = new URL(input.baseUrl?.trim() ?? "").hostname.toLowerCase();
+  } catch {
+    // The server remains the source of truth for malformed endpoint errors.
+  }
+  return (hostname === "token.sensenova.ai" ||
+    hostname === "token.sensenova.cn" ||
+    hostname === "api.sensenova.cn") &&
+    (input.profileId === undefined ||
+      input.profileId === "openai" ||
+      input.profileId === "customOpenAICompatible")
+    ? "sensenova"
+    : (input.profileId ?? "openai");
+}
 
 /**
  * Look up the driver metadata for an instance's `driver` field. Accepts

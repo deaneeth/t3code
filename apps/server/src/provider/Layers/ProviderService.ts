@@ -295,6 +295,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           eventType: canonicalEvent.type,
         }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
       ),
+      Effect.andThen(
+        event.type === "turn.completed" || event.type === "session.state.changed"
+          ? registry.getByInstance(source.instanceId).pipe(
+              Effect.flatMap((adapter) => adapter.listSessions()),
+              Effect.flatMap((sessions) => {
+                const session = sessions.find((candidate) => candidate.threadId === event.threadId);
+                return session
+                  ? upsertSessionBinding(session, event.threadId, { lastRuntimeEvent: event.type })
+                  : Effect.void;
+              }),
+              Effect.catch(() => Effect.void),
+            )
+          : Effect.void,
+      ),
     );
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters

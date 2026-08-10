@@ -36,6 +36,7 @@ function providerDisplayLabel(provider: {
   if (provider.driver === "codex") return "Codex";
   if (provider.driver === "claudeAgent") return "Claude";
   if (provider.driver === "commandcode") return "CommandCode";
+  if (provider.driver === "api") return provider.displayName ?? "API provider";
   return provider.instanceId;
 }
 

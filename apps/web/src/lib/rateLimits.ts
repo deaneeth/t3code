@@ -7,6 +7,8 @@ export type RateLimitWindow = {
   readonly resetsAt: number | null;
   readonly windowDurationMins: number | null;
   readonly label: string;
+  readonly limit?: number;
+  readonly remaining?: number;
 };
 
 export type RateLimitCredits = {
@@ -31,6 +33,7 @@ export type ProviderRateLimitSnapshot = {
   readonly status: "allowed" | "warning" | "rejected" | null;
   readonly reachedType: string | null;
   readonly updatedAt: string;
+  readonly quality?: "provider-reported" | "local-observation";
 };
 
 /** Convert the shared server snapshot into the popup's provider-neutral shape. */
@@ -52,6 +55,8 @@ export function toProviderRateLimitSnapshot(
             ? 7 * 24 * 60
             : null,
       label: window.label,
+      ...(window.limit !== undefined ? { limit: window.limit } : {}),
+      ...(window.remaining !== undefined ? { remaining: window.remaining } : {}),
     })),
     credits: snapshot.credits,
     spendControl: snapshot.spendControl
@@ -66,6 +71,7 @@ export function toProviderRateLimitSnapshot(
     status: snapshot.status,
     reachedType: null,
     updatedAt: snapshot.updatedAt,
+    quality: snapshot.quality ?? "provider-reported",
   };
 }
 
@@ -148,6 +154,116 @@ function formatClaudeWindowLabel(rateLimitType: string | null): string {
     default:
       return "Window";
   }
+}
+
+function parseApiRateLimits(
+  rateLimits: Record<string, unknown>,
+): Omit<ProviderRateLimitSnapshot, "updatedAt"> | null {
+  const value = (keys: ReadonlyArray<string>): unknown => {
+    const entry = Object.entries(rateLimits).find(([key]) => keys.includes(key.toLowerCase()));
+    return entry?.[1];
+  };
+  const number = (raw: unknown): number | null => {
+    const parsed = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const reset = (raw: unknown): number | null => {
+    if (typeof raw === "string") {
+      const absolute = Date.parse(raw);
+      if (Number.isFinite(absolute)) return absolute;
+      const match = raw.trim().match(/^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/iu);
+      if (match) {
+        const multipliers = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+        const amount = Number(match[1]);
+        const unit = match[2]?.toLowerCase() as keyof typeof multipliers | undefined;
+        return unit && Number.isFinite(amount)
+          ? Date.now() + Math.round(amount * multipliers[unit])
+          : null;
+      }
+    }
+    return normalizeResetTimestamp(raw);
+  };
+  const model = asString(rateLimits.model);
+  const candidates = [
+    {
+      label: "Requests",
+      limit: value([
+        "x-ratelimit-limit-requests",
+        "ratelimit-limit-requests",
+        "x-ratelimit-limit",
+        "ratelimit-limit",
+        "sensenova-quota-limit-requests",
+      ]),
+      remaining: value([
+        "x-ratelimit-remaining-requests",
+        "ratelimit-remaining-requests",
+        "x-ratelimit-remaining",
+        "ratelimit-remaining",
+        "sensenova-quota-remaining-requests",
+      ]),
+      reset: value([
+        "x-ratelimit-reset-requests",
+        "ratelimit-reset-requests",
+        "x-ratelimit-reset",
+        "ratelimit-reset",
+        "sensenova-quota-reset-at",
+      ]),
+    },
+    {
+      label: "Input tokens",
+      limit: value([
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-limit-input-tokens",
+        "ratelimit-limit-tokens",
+      ]),
+      remaining: value([
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-remaining-input-tokens",
+        "ratelimit-remaining-tokens",
+      ]),
+      reset: value([
+        "x-ratelimit-reset-tokens",
+        "x-ratelimit-reset-input-tokens",
+        "ratelimit-reset-tokens",
+      ]),
+    },
+  ];
+  const windows = candidates.flatMap((candidate) => {
+    const limit = number(candidate.limit);
+    const remaining = number(candidate.remaining);
+    if (limit === null || limit <= 0 || remaining === null) return [];
+    return [
+      {
+        label: model ? `${model} · ${candidate.label}` : candidate.label,
+        usedPercent: Math.max(
+          0,
+          Math.min(100, ((limit - Math.min(limit, remaining)) / limit) * 100),
+        ),
+        resetsAt: reset(candidate.reset),
+        windowDurationMins: null,
+        limit,
+        remaining,
+      },
+    ];
+  });
+  if (windows.length === 0) return null;
+  return {
+    provider: "api",
+    windows,
+    credits: null,
+    spendControl: null,
+    planType: asString(rateLimits.planType),
+    status: windows.some((window) => window.usedPercent >= 100)
+      ? "rejected"
+      : windows.some((window) => window.usedPercent >= 80)
+        ? "warning"
+        : "allowed",
+    reachedType: null,
+    quality:
+      rateLimits.telemetrySource === "local-observation"
+        ? "local-observation"
+        : "provider-reported",
+  };
 }
 
 // ── Codex Parser ────────────────────────────────────────────────────
@@ -415,8 +531,15 @@ export function extractLatestRateLimitSnapshot(
 ): ProviderRateLimitSnapshot | null {
   if (!providerKind) return null;
 
-  // Only Codex, Claude, and CommandCode send rate limit data
-  if (providerKind !== "codex" && providerKind !== "claude" && providerKind !== "commandcode")
+  // API providers may report headers or T3 may publish an explicitly marked
+  // local-observation window when the provider documents a quota but exposes
+  // no quota endpoint through the inference API.
+  if (
+    providerKind !== "codex" &&
+    providerKind !== "claude" &&
+    providerKind !== "commandcode" &&
+    providerKind !== "api"
+  )
     return null;
 
   // Walk backwards to find the latest rate limit update
@@ -438,6 +561,8 @@ export function extractLatestRateLimitSnapshot(
       parsed = parseClaudeRateLimits(rateLimits);
     } else if (providerKind === "commandcode") {
       parsed = parseCommandCodeRateLimits(rateLimits);
+    } else if (providerKind === "api") {
+      parsed = parseApiRateLimits(rateLimits);
     }
 
     if (parsed) {

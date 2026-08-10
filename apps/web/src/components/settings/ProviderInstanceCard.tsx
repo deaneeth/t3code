@@ -37,7 +37,11 @@ import { Switch } from "../ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import type { DriverOption } from "./providerDriverMeta";
+import {
+  API_PROVIDER_PROFILE_OPTIONS,
+  resolveApiProfileId,
+  type DriverOption,
+} from "./providerDriverMeta";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -156,6 +160,8 @@ function ProviderAuthEmail(props: {
 function ProviderEnvironmentSection(props: {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
+  readonly title?: string;
+  readonly emptyDescription?: string;
 }) {
   const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
     props.environment.map(makeEnvironmentDraftRow),
@@ -205,31 +211,36 @@ function ProviderEnvironmentSection(props: {
   return (
     <div className="grid gap-2">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-xs font-medium text-foreground">Environment variables</span>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="h-7 gap-1.5 px-2 text-xs"
-          onClick={() =>
-            setRows([
-              ...rows,
-              {
-                id: nextEnvironmentVariableDraftId(),
-                name: "",
-                value: "",
-                sensitive: true,
-              },
-            ])
-          }
-        >
-          <PlusIcon className="size-3" />
-          Add
-        </Button>
+        <span className="text-xs font-medium text-foreground">
+          {props.title ?? "Environment variables"}
+        </span>
+        {props.title === "API credentials" ? null : (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 px-2 text-xs"
+            onClick={() =>
+              setRows([
+                ...rows,
+                {
+                  id: nextEnvironmentVariableDraftId(),
+                  name: "",
+                  value: "",
+                  sensitive: true,
+                },
+              ])
+            }
+          >
+            <PlusIcon className="size-3" />
+            Add
+          </Button>
+        )}
       </div>
       {rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          Add variables to pass API keys, base URLs, or other per-instance CLI settings.
+          {props.emptyDescription ??
+            "Add variables to pass API keys, base URLs, or other per-instance CLI settings."}
         </p>
       ) : (
         <div className="overflow-hidden rounded-md border border-border/70">
@@ -409,6 +420,21 @@ export function ProviderInstanceCard({
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
   const summary = rawSummary;
+  const apiCapabilities = liveProvider?.apiCapabilities;
+  const apiCapabilityEntries = apiCapabilities ? Object.entries(apiCapabilities) : [];
+  const apiCapabilitySummaryKeys = new Set([
+    "authentication",
+    "modelDiscovery",
+    "toolCalls",
+    "perRequestUsage",
+  ]);
+  const apiCapabilitySummary = apiCapabilityEntries.filter(([key]) =>
+    apiCapabilitySummaryKeys.has(key),
+  );
+  const apiCapabilityExtraCount = Math.max(
+    0,
+    apiCapabilityEntries.length - apiCapabilitySummary.length,
+  );
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
   const updateCommand = versionAdvisory?.updateCommand ?? null;
@@ -705,6 +731,34 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {apiCapabilityEntries.length > 0 ? (
+              <div
+                className="mt-1.5 flex flex-wrap items-center gap-1.5"
+                aria-label="API provider capability summary"
+              >
+                {apiCapabilitySummary.map(([key, value]) => (
+                  <Badge
+                    key={key}
+                    variant={
+                      value.state === "verified"
+                        ? "success"
+                        : value.state === "unavailable"
+                          ? "outline"
+                          : "warning"
+                    }
+                    size="sm"
+                    title={value.detail}
+                  >
+                    {key}: {value.state}
+                  </Badge>
+                ))}
+                {apiCapabilityExtraCount > 0 ? (
+                  <span className="text-[11px] text-muted-foreground">
+                    +{apiCapabilityExtraCount} more in details
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Button
@@ -761,8 +815,90 @@ export function ProviderInstanceCard({
               <ProviderEnvironmentSection
                 environment={instance.environment ?? []}
                 onChange={updateEnvironment}
+                {...(String(instance.driver) === "api"
+                  ? {
+                      title: "API credentials",
+                      emptyDescription:
+                        "API keys are stored as server-side secrets and never returned to this app.",
+                    }
+                  : {})}
               />
             </div>
+
+            {driverOption ? (
+              String(instance.driver) === "api" ? (
+                <label className="block">
+                  <span className="text-xs font-medium text-foreground">API profile</span>
+                  <select
+                    className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
+                    value={resolveApiProfileId({
+                      profileId:
+                        typeof (instance.config as Record<string, unknown> | undefined)
+                          ?.profileId === "string"
+                          ? ((instance.config as Record<string, unknown>).profileId as string)
+                          : undefined,
+                      baseUrl:
+                        typeof (instance.config as Record<string, unknown> | undefined)?.baseUrl ===
+                        "string"
+                          ? ((instance.config as Record<string, unknown>).baseUrl as string)
+                          : undefined,
+                    })}
+                    onChange={(event) => {
+                      const selected = API_PROVIDER_PROFILE_OPTIONS.find(
+                        ([id]) => id === event.target.value,
+                      );
+                      updateConfig(
+                        nextConfigBlobWithValue(
+                          nextConfigBlobWithValue(instance.config, "profileId", event.target.value),
+                          "protocol",
+                          selected?.[2] ?? "openai-chat-completions",
+                        ),
+                      );
+                    }}
+                    aria-label="API profile"
+                  >
+                    {API_PROVIDER_PROFILE_OPTIONS.map(([id, name]) => (
+                      <option key={id} value={id}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    T3 uses the selected provider protocol for authentication, model discovery,
+                    streaming, tools, and usage normalization.
+                  </span>
+                </label>
+              ) : null
+            ) : null}
+
+            {driverOption ? (
+              apiCapabilityEntries.length > 0 ? (
+                <div
+                  className="rounded-lg border border-border/60 bg-muted/15 p-3"
+                  aria-label="API provider capabilities"
+                >
+                  <p className="text-xs font-medium text-foreground">Capability details</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {apiCapabilityEntries.map(([key, value]) => (
+                      <Badge
+                        key={key}
+                        variant={
+                          value.state === "verified"
+                            ? "success"
+                            : value.state === "unavailable"
+                              ? "outline"
+                              : "warning"
+                        }
+                        size="sm"
+                        title={value.detail}
+                      >
+                        {key}: {value.state}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              ) : null
+            ) : null}
 
             {driverOption ? (
               <ProviderSettingsForm

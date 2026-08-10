@@ -51,6 +51,19 @@ function resetAt(value: unknown): number | null {
   return integer > 0 && integer < 1_000_000_000_000 ? integer * 1000 : integer;
 }
 
+function resetAtFromHeader(value: unknown): number | null {
+  if (typeof value !== "string") return resetAt(value);
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const absolute = Date.parse(trimmed);
+  if (Number.isFinite(absolute)) return absolute;
+  // Relative reset values need a clock at the adapter boundary. Do not
+  // invent an absolute timestamp in this pure normalizer; numeric epochs and
+  // HTTP-date values remain fully supported.
+  if (/^\d+(?:\.\d+)?(?:ms|s|m|h|d)$/iu.test(trimmed)) return null;
+  return resetAt(trimmed);
+}
+
 function firstValue(input: RecordValue, ...keys: ReadonlyArray<string>): unknown {
   for (const key of keys) {
     if (input[key] !== undefined) return input[key];
@@ -88,9 +101,7 @@ function statusFor(
     : "allowed";
 }
 
-function parseCodex(
-  rateLimits: RecordValue,
-): Omit<ProviderLimitSnapshot, "instanceId" | "driver" | "updatedAt" | "source"> | null {
+function parseCodex(rateLimits: RecordValue): ProviderLimitData | null {
   const windows = ["primary", "secondary"].flatMap((key) => {
     const input = record(rateLimits[key]);
     const usedPercent = percent(firstValue(input ?? {}, "usedPercent", "used_percent"));
@@ -140,9 +151,7 @@ function parseCodex(
   };
 }
 
-function parseClaude(
-  rateLimits: RecordValue,
-): Omit<ProviderLimitSnapshot, "instanceId" | "driver" | "updatedAt" | "source"> | null {
+function parseClaude(rateLimits: RecordValue): ProviderLimitData | null {
   const info = record(rateLimits.rate_limit_info);
   if (!info) return null;
   const utilization = numberValue(firstValue(info, "utilization", "used_percent"));
@@ -194,9 +203,7 @@ function parseClaude(
   };
 }
 
-function parseCommandCode(
-  rateLimits: RecordValue,
-): Omit<ProviderLimitSnapshot, "instanceId" | "driver" | "updatedAt" | "source"> | null {
+function parseCommandCode(rateLimits: RecordValue): ProviderLimitData | null {
   const windows = [
     ["5hr", rateLimits.fiveHour],
     ["7d", rateLimits.weekly],
@@ -218,19 +225,110 @@ function parseCommandCode(
   };
 }
 
+function headerValue(rateLimits: RecordValue, ...keys: ReadonlyArray<string>): unknown {
+  const entries = Object.entries(rateLimits);
+  for (const key of keys) {
+    const exact = entries.find(([candidate]) => candidate.toLowerCase() === key);
+    if (exact) return exact[1];
+  }
+  return undefined;
+}
+
+function parseApiRateLimits(rateLimits: RecordValue): ProviderLimitData | null {
+  const model = stringValue(rateLimits.model);
+  const windows = [
+    {
+      label: "Requests",
+      limit: headerValue(
+        rateLimits,
+        "x-ratelimit-limit-requests",
+        "ratelimit-limit-requests",
+        "x-ratelimit-limit",
+        "ratelimit-limit",
+        "sensenova-quota-limit-requests",
+      ),
+      remaining: headerValue(
+        rateLimits,
+        "x-ratelimit-remaining-requests",
+        "ratelimit-remaining-requests",
+        "x-ratelimit-remaining",
+        "sensenova-quota-remaining-requests",
+      ),
+      reset: headerValue(
+        rateLimits,
+        "x-ratelimit-reset-requests",
+        "ratelimit-reset-requests",
+        "x-ratelimit-reset",
+        "sensenova-quota-reset-at",
+      ),
+    },
+    {
+      label: "Input tokens",
+      limit: headerValue(
+        rateLimits,
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-limit-input-tokens",
+        "ratelimit-limit-tokens",
+      ),
+      remaining: headerValue(
+        rateLimits,
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-remaining-input-tokens",
+        "ratelimit-remaining-tokens",
+      ),
+      reset: headerValue(
+        rateLimits,
+        "x-ratelimit-reset-tokens",
+        "x-ratelimit-reset-input-tokens",
+        "ratelimit-reset-tokens",
+      ),
+    },
+  ].flatMap((candidate) => {
+    const limit = nonNegativeNumber(candidate.limit);
+    const remaining = nonNegativeNumber(candidate.remaining);
+    if (limit === null || limit <= 0 || remaining === null) return [];
+    const usedPercent = Math.max(
+      0,
+      Math.min(100, ((limit - Math.min(limit, remaining)) / limit) * 100),
+    );
+    return [
+      {
+        label: model ? `${model} · ${candidate.label}` : candidate.label,
+        usedPercent,
+        resetsAtMs: resetAtFromHeader(candidate.reset),
+        limit,
+        remaining,
+      },
+    ];
+  });
+  if (windows.length === 0) return null;
+  return {
+    windows,
+    credits: null,
+    spendControl: null,
+    planType: stringValue(rateLimits.planType),
+    status: statusFor(null, null, windows),
+  };
+}
+
 function parseForDriver(
   driver: ProviderDriverKind,
   rateLimits: RecordValue,
-): Omit<ProviderLimitSnapshot, "instanceId" | "driver" | "updatedAt" | "source"> | null {
+): ProviderLimitData | null {
   if (driver === "codex") return parseCodex(rateLimits);
   if (driver === "claudeAgent" || driver === "claude") return parseClaude(rateLimits);
   if (driver === "commandcode") return parseCommandCode(rateLimits);
+  if (driver === "api") return parseApiRateLimits(rateLimits);
   // Unknown providers must publish a normalized provider-activity payload
   // through their adapter before it is safe to render as quota telemetry.
   return null;
 }
 
-type ParsedLimit = Omit<ProviderLimitSnapshot, "instanceId" | "driver" | "updatedAt" | "source">;
+type ProviderLimitData = Omit<
+  ProviderLimitSnapshot,
+  "instanceId" | "driver" | "updatedAt" | "source" | "quality"
+>;
+type ParsedLimit = ProviderLimitData & Pick<ProviderLimitSnapshot, "quality">;
 
 export function providerLimitSnapshotFromRateLimits(input: {
   readonly provider: ServerProvider;
@@ -246,6 +344,9 @@ export function providerLimitSnapshotFromRateLimits(input: {
     ...parsed,
     updatedAt: input.updatedAt,
     source: input.source,
+    ...(record(input.rateLimits)?.telemetrySource === "local-observation"
+      ? { quality: "local-observation" as const }
+      : { quality: "provider-reported" as const }),
   };
 }
 
@@ -259,6 +360,7 @@ function mergeParsedLimits(previous: ParsedLimit | undefined, next: ParsedLimit)
     credits: next.credits ?? previous.credits,
     spendControl: next.spendControl ?? previous.spendControl,
     planType: next.planType ?? previous.planType,
+    quality: next.quality ?? previous.quality,
     status: statusFor(
       next.status === "rejected"
         ? "rejected"
@@ -309,6 +411,7 @@ export function latestProviderLimitSnapshots(
       spendControl: snapshot.spendControl,
       planType: snapshot.planType,
       status: snapshot.status,
+      quality: snapshot.quality,
     } satisfies ParsedLimit;
     const current = latest.get(instanceId);
     latest.set(instanceId, {

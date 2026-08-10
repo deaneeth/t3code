@@ -6,6 +6,8 @@ import { useMemo, useState } from "react";
 import {
   ProviderInstanceId,
   ProviderDriverKind,
+  ApiProviderSettings,
+  ApiProviderProfileId,
   type EnvironmentId,
   type ProviderInstanceConfig,
 } from "@t3tools/contracts";
@@ -27,7 +29,18 @@ import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { toastManager } from "../ui/toast";
-import { DRIVER_OPTION_BY_VALUE, DRIVER_OPTIONS } from "./providerDriverMeta";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import {
+  API_PROVIDER_PROFILE_OPTIONS,
+  DRIVER_OPTION_BY_VALUE,
+  DRIVER_OPTIONS,
+  resolveApiProfileId,
+} from "./providerDriverMeta";
 import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSettingsForm";
 import { AnimatedHeight } from "../AnimatedHeight";
 import {
@@ -135,6 +148,11 @@ export function AddProviderInstanceDialog({
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
   const [label, setLabel] = useState("");
   const [accentColor, setAccentColor] = useState<string>("");
+  const [apiKey, setApiKey] = useState("");
+  const [testModel, setTestModel] = useState("");
+  const [apiTestPassed, setApiTestPassed] = useState(false);
+  const [apiTestError, setApiTestError] = useState<string | null>(null);
+  const [isTestingApi, setIsTestingApi] = useState(false);
   const [instanceIdOverride, setInstanceIdOverride] = useState<string | null>(null);
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
@@ -142,6 +160,9 @@ export function AddProviderInstanceDialog({
   // Errors are suppressed until the user has tried to submit once. After that
   // they update live so fixing the problem clears the message in place.
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
+  const testApiProvider = useAtomCommand(serverEnvironment.testApiProvider, {
+    reportFailure: false,
+  });
 
   const existingIds = useMemo(
     () => new Set(Object.keys(settings.providerInstances ?? {})),
@@ -149,7 +170,13 @@ export function AddProviderInstanceDialog({
   );
 
   const driverOption = DRIVER_OPTION_BY_VALUE[driver] ?? DEFAULT_DRIVER_OPTION;
-  const instanceId = instanceIdOverride ?? deriveInstanceId(driver, label);
+  const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
+  const instanceId =
+    instanceIdOverride ??
+    deriveInstanceId(
+      driver,
+      driver === "api" ? String(configDraft.profileId ?? "provider") : label,
+    );
   const driverSettingsFields = useMemo(
     () => deriveProviderSettingsFields(driverOption),
     [driverOption],
@@ -159,17 +186,88 @@ export function AddProviderInstanceDialog({
   const previewLabel = label.trim() || `${driverOption.label} Workspace`;
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
-  const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
   const setConfigDraft = (config: Record<string, unknown> | undefined) => {
+    let nextConfig = config;
+    if (driver === "api" && config !== undefined) {
+      const inferredProfile = resolveApiProfileId({
+        profileId: typeof config.profileId === "string" ? config.profileId : undefined,
+        baseUrl: typeof config.baseUrl === "string" ? config.baseUrl : undefined,
+      });
+      const inferredOption = API_PROVIDER_PROFILE_OPTIONS.find(
+        ([value]) => value === inferredProfile,
+      );
+      if (inferredOption && inferredProfile !== config.profileId) {
+        nextConfig = { ...config, profileId: inferredProfile, protocol: inferredOption[2] };
+      }
+    }
+    if (driver === "api") {
+      setApiTestPassed(false);
+      setApiTestError(null);
+    }
     setConfigByDriver((existing) => {
       const next = { ...existing };
-      if (config === undefined || Object.keys(config).length === 0) {
+      if (nextConfig === undefined || Object.keys(nextConfig).length === 0) {
         delete next[driver];
       } else {
-        next[driver] = config;
+        next[driver] = nextConfig;
       }
       return next;
     });
+  };
+
+  const runApiTest = async () => {
+    const settingsDraft = ApiProviderSettings.make({
+      ...configDraft,
+      enabled: true,
+      profileId: String(configDraft.profileId ?? "openai"),
+      protocol: String(
+        configDraft.protocol ?? "openai-responses",
+      ) as ApiProviderSettings["protocol"],
+      baseUrl: String(configDraft.baseUrl ?? ""),
+      apiKeyHeader: String(configDraft.apiKeyHeader ?? ""),
+      apiKeyPrefix: String(configDraft.apiKeyPrefix ?? ""),
+      apiKeyEnvironmentVariable: "T3_API_KEY",
+      organization: String(configDraft.organization ?? ""),
+      project: String(configDraft.project ?? ""),
+      region: String(configDraft.region ?? ""),
+      customModels: Array.isArray(configDraft.customModels) ? configDraft.customModels : [],
+    });
+    if (!apiKey.trim()) {
+      setApiTestError("Enter an API key first.");
+      return;
+    }
+    if (!testModel.trim()) {
+      setApiTestError("Enter a model ID for the verification request.");
+      return;
+    }
+    setIsTestingApi(true);
+    setApiTestPassed(false);
+    setApiTestError(null);
+    const result = await testApiProvider({
+      environmentId,
+      input: {
+        profileId: ApiProviderProfileId.make(String(settingsDraft.profileId)),
+        protocol: settingsDraft.protocol,
+        baseUrl: settingsDraft.baseUrl,
+        apiKeyHeader: settingsDraft.apiKeyHeader,
+        apiKeyPrefix: settingsDraft.apiKeyPrefix,
+        apiKey: apiKey.trim(),
+        model: testModel.trim(),
+      },
+    });
+    setIsTestingApi(false);
+    if (result._tag === "Success") {
+      setApiTestPassed(true);
+      toastManager.add({
+        type: "success",
+        title: "API connection verified",
+        description: `Received a response from ${result.value.model}.`,
+      });
+      return;
+    }
+    if (isAtomCommandInterrupted(result)) return;
+    const error = squashAtomCommandFailure(result);
+    setApiTestError(error instanceof Error ? error.message : "The provider test failed.");
   };
 
   const applyWizardNavigation = (navigation: WizardNavigation) => {
@@ -189,10 +287,43 @@ export function AddProviderInstanceDialog({
 
   const handleSave = () => {
     setHasAttemptedSubmit(true);
+    if (driver === "api" && apiKey.trim().length === 0) {
+      toastManager.add({
+        type: "error",
+        title: "API key required",
+        description: "Add the provider API key before creating this instance.",
+      });
+      return;
+    }
+    if (driver === "api" && !apiTestPassed) {
+      toastManager.add({
+        type: "error",
+        title: "Test the API connection first",
+        description:
+          "T3 only saves API providers after the current key, endpoint, and model return a valid response.",
+      });
+      return;
+    }
     if (instanceIdError !== null) return;
 
     const config = configByDriver[driver] ?? {};
-    const hasConfig = Object.keys(config).length > 0;
+    const persistedConfig =
+      driver === "api" && apiKey.trim().length > 0 && testModel.trim().length > 0
+        ? {
+            ...config,
+            customModels: Array.from(
+              new Set([
+                ...(Array.isArray(config.customModels)
+                  ? config.customModels.filter(
+                      (value): value is string => typeof value === "string",
+                    )
+                  : []),
+                testModel.trim(),
+              ]),
+            ),
+          }
+        : config;
+    const hasConfig = Object.keys(persistedConfig).length > 0;
     const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
 
     const nextInstance: ProviderInstanceConfig = {
@@ -200,7 +331,18 @@ export function AddProviderInstanceDialog({
       enabled: true,
       ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
       ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
-      ...(hasConfig ? { config } : {}),
+      ...(driver === "api" && apiKey.trim().length > 0
+        ? {
+            environment: [
+              {
+                name: "T3_API_KEY",
+                value: apiKey,
+                sensitive: true,
+              },
+            ],
+          }
+        : {}),
+      ...(hasConfig ? { config: persistedConfig } : {}),
     };
     // `ProviderInstanceId.make` revalidates the slug; we've already checked
     // it via `validateInstanceId`, but going through the brand constructor
@@ -327,7 +469,9 @@ export function AddProviderInstanceDialog({
                 </span>
               </label>
 
-              <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
+              <label
+                className={cn("grid gap-2", (wizardStep !== 1 || driver === "api") && "hidden")}
+              >
                 <span className="text-xs font-medium text-foreground">Instance ID</span>
                 <Input
                   className="bg-background"
@@ -347,7 +491,7 @@ export function AddProviderInstanceDialog({
                 )}
               </label>
 
-              <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
+              <div className={cn("grid gap-2", (wizardStep !== 1 || driver === "api") && "hidden")}>
                 <span className="text-xs font-medium text-foreground">Accent color</span>
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <input
@@ -394,6 +538,95 @@ export function AddProviderInstanceDialog({
                 </span>
               </div>
 
+              {driver === "api" ? (
+                <div className={cn("grid gap-3", wizardStep !== 2 && "hidden")}>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-foreground">API profile</span>
+                    <select
+                      className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                      value={String(configDraft.profileId ?? "openai")}
+                      onChange={(event) => {
+                        const selected = API_PROVIDER_PROFILE_OPTIONS.find(
+                          ([value]) => value === event.target.value,
+                        );
+                        setConfigDraft({
+                          ...configDraft,
+                          profileId: event.target.value,
+                          protocol: selected?.[2] ?? "openai-chat-completions",
+                        });
+                      }}
+                    >
+                      {API_PROVIDER_PROFILE_OPTIONS.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-[11px] text-muted-foreground">
+                      Select the provider protocol. T3 will verify the key server-side and mark
+                      unavailable account data explicitly.
+                    </span>
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-foreground">API key</span>
+                    <Input
+                      type="password"
+                      autoComplete="new-password"
+                      value={apiKey}
+                      onChange={(event) => {
+                        setApiKey(event.target.value);
+                        setApiTestPassed(false);
+                        setApiTestError(null);
+                      }}
+                      placeholder="Stored securely on the T3 server"
+                    />
+                    <span className="text-[11px] text-muted-foreground">
+                      The key is saved as a sensitive provider secret and is never returned to the
+                      client.
+                    </span>
+                  </label>
+                  <label className="grid gap-1.5">
+                    <span className="text-xs font-medium text-foreground">Test model ID</span>
+                    <Input
+                      value={testModel}
+                      onChange={(event) => {
+                        setTestModel(event.target.value);
+                        setApiTestPassed(false);
+                        setApiTestError(null);
+                      }}
+                      placeholder="e.g. sensenova-6.7-flash-lite"
+                    />
+                    <span className="text-[11px] text-muted-foreground">
+                      T3 sends one tiny request with this model before allowing the provider to be
+                      added.
+                    </span>
+                  </label>
+                  <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 p-3">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void runApiTest()}
+                      disabled={isTestingApi || !apiKey.trim() || !testModel.trim()}
+                    >
+                      {isTestingApi
+                        ? "Testing connection…"
+                        : apiTestPassed
+                          ? "Connection verified"
+                          : "Test connection"}
+                    </Button>
+                    {apiTestPassed ? (
+                      <p className="text-xs text-emerald-600">
+                        The key, endpoint, protocol, and model returned a valid response.
+                      </p>
+                    ) : null}
+                    {apiTestError ? (
+                      <p className="text-xs text-destructive">{apiTestError}</p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
               {driverSettingsFields.length > 0 ? (
                 <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
                   <ProviderSettingsForm
@@ -433,7 +666,7 @@ export function AddProviderInstanceDialog({
                 Next
               </Button>
             ) : (
-              <Button size="sm" onClick={handleSave}>
+              <Button size="sm" onClick={handleSave} disabled={driver === "api" && !apiTestPassed}>
                 Add instance
               </Button>
             )}

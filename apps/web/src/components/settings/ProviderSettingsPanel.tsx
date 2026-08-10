@@ -394,14 +394,39 @@ export function EnvironmentProviderSettings({
     () => new Map(providerUpdateCandidates.map((candidate) => [candidate.instanceId, candidate])),
     [providerUpdateCandidates],
   );
-  const visibleProviderSettings = PROVIDER_SETTINGS.filter(
-    (providerSettings) =>
-      providerSettings.provider !== "cursor" ||
-      serverProviders.some(
+  const isConfiguredApiInstance = (instance: ProviderInstanceConfig): boolean => {
+    if (String(instance.driver) !== "api") return false;
+    const hasSecret = (instance.environment ?? []).some(
+      (variable) =>
+        variable.name === "T3_API_KEY" &&
+        (variable.valueRedacted === true || variable.value.trim().length > 0),
+    );
+    const config = instance.config;
+    const configRecord =
+      config !== null && typeof config === "object"
+        ? (config as Record<string, unknown>)
+        : undefined;
+    const hasEndpointOrModels =
+      config !== null &&
+      typeof config === "object" &&
+      ((typeof configRecord?.baseUrl === "string" && configRecord.baseUrl.trim().length > 0) ||
+        (Array.isArray(configRecord?.customModels) &&
+          (configRecord.customModels as ReadonlyArray<unknown>).length > 0));
+    return hasSecret || hasEndpointOrModels;
+  };
+  const visibleProviderSettings = PROVIDER_SETTINGS.filter((providerSettings) => {
+    if (providerSettings.provider === "cursor") {
+      return serverProviders.some(
         (provider) =>
           provider.instanceId === defaultInstanceIdForDriver(ProviderDriverKind.make("cursor")),
-      ),
-  );
+      );
+    }
+    // API is an instance-only driver. Its generic driver slot is an add
+    // affordance, not a provider, so only explicit configured instances are
+    // rendered below.
+    if (providerSettings.provider === "api") return false;
+    return true;
+  });
   const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
@@ -559,6 +584,7 @@ export function EnvironmentProviderSettings({
   for (const [driver, list] of instancesByDriver) {
     if (visibleDriverKinds.has(driver)) continue;
     for (const [id, instance] of list) {
+      if (String(driver) === "api" && !isConfiguredApiInstance(instance)) continue;
       rows.push({
         instanceId: id,
         instance,
@@ -666,22 +692,16 @@ export function EnvironmentProviderSettings({
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
             {!readOnly ? (
               <>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Button
-                        size="icon-xs"
-                        variant="ghost"
-                        className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-                        onClick={() => setIsAddInstanceDialogOpen(true)}
-                        aria-label="Add provider instance"
-                      >
-                        <PlusIcon className="size-3" />
-                      </Button>
-                    }
-                  />
-                  <TooltipPopup side="top">Add provider instance</TooltipPopup>
-                </Tooltip>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                  onClick={() => setIsAddInstanceDialogOpen(true)}
+                  aria-label="Add provider instance"
+                  title="Add provider instance"
+                >
+                  <PlusIcon className="size-3" />
+                </Button>
                 <Tooltip>
                   <TooltipTrigger
                     render={

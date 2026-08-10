@@ -30,4 +30,5 @@ export * from "./previewAutomation.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./usage.ts";
 export * from "./providerLimits.ts";
+export * from "./apiProvider.ts";
 export * from "./rpc.ts";

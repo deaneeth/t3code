@@ -43,6 +43,7 @@ import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
+import * as ApiProviderUsageLedger from "./ApiProviderUsageLedger.ts";
 import { selectCodexTranscriptFiles } from "./usageCodexFiles.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
@@ -129,6 +130,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const apiUsageLedger = yield* Effect.serviceOption(ApiProviderUsageLedger.ApiProviderUsageLedger);
 
   const fileCache: ScanCache = new Map();
   let cacheDirty = false;
@@ -460,6 +462,54 @@ export const make = Effect.gen(function* () {
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
     const codexActiveFiles = new Set<string>();
+
+    // API turns do not create provider transcript files. They are read from a
+    // separate durable ledger and enter the same aggregator so the Usage page
+    // cannot silently omit API traffic or mix provider-reported cost with a
+    // rate-table estimate.
+    if (Option.isSome(apiUsageLedger)) {
+      const apiRecords = yield* apiUsageLedger.value.list();
+      const sessionIds = new Set<string>();
+      let recordsInWindow = 0;
+      for (const record of apiRecords) {
+        const timestampMs = Date.parse(record.recordedAt);
+        if (!Number.isFinite(timestampMs)) continue;
+        const usageRecord: UsageRecord = {
+          provider: "api",
+          timestampMs,
+          model: record.model,
+          sessionId: String(record.threadId),
+          totals: {
+            uncachedInputTokens: Math.max(
+              0,
+              (record.inputTokens ?? 0) - (record.cachedInputTokens ?? 0),
+            ),
+            cachedInputTokens: record.cachedInputTokens ?? 0,
+            cacheCreationTokens: 0,
+            outputTokens: record.outputTokens ?? 0,
+            reasoningTokens: record.reasoningOutputTokens ?? 0,
+          },
+          reportedCostUsd: record.providerReportedCostUsd ?? null,
+          dedupeKey: record.requestId
+            ? `api:${record.requestId}`
+            : `api:${record.turnId}:${record.recordedAt}`,
+        };
+        if (aggregator.add(usageRecord)) {
+          recordsInWindow += 1;
+          sessionIds.add(usageRecord.sessionId);
+        }
+      }
+      const ledgerPath = path.join(config.stateDir, "api-provider-usage.json");
+      sources.push({
+        fingerprint: { hostId, provider: "api", resolvedHomePath: ledgerPath, volumeId: "" },
+        status: "ok",
+        scannedFiles: recordsInWindow > 0 ? 1 : 0,
+        skippedFiles: recordsInWindow > 0 ? 0 : 1,
+        malformedRecords: 0,
+        distinctSessions: sessionIds.size,
+        message: null,
+      });
+    }
 
     for (const { provider, dir, instanceId, codexArchive, codexSharedHomePath } of dirs) {
       const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));

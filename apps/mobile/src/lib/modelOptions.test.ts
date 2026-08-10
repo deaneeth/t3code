@@ -10,6 +10,30 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("keeps discovered API-provider models selectable with their provider identity", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "api-openai",
+          driver: "api",
+          displayName: "OpenAI API",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [{ slug: "gpt-api", name: "GPT API", isCustom: false, capabilities: null }],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    expect(buildModelOptions(config, null)).toMatchObject([
+      {
+        providerKey: "api-openai",
+        providerLabel: "OpenAI API",
+        key: "api-openai:gpt-api",
+      },
+    ]);
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [

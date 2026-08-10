@@ -26,6 +26,52 @@ const readModel = (threads: unknown[]): OrchestrationReadModel =>
   ({ threads }) as unknown as OrchestrationReadModel;
 
 describe("latestProviderLimitSnapshots", () => {
+  it("normalizes API rate-limit headers and does not fabricate a quota without headers", () => {
+    const snapshot = providerLimitSnapshotFromRateLimits({
+      provider: provider("sensenova-api", "api"),
+      rateLimits: {
+        model: "sensenova-6.7-flash-lite",
+        "x-ratelimit-limit-requests": "1500",
+        "x-ratelimit-remaining-requests": "1498",
+        "x-ratelimit-reset-requests": "2026-08-10T14:00:00.000Z",
+      },
+      updatedAt: "2026-08-10T13:00:00.000Z",
+      source: "provider-activity",
+    });
+
+    expect(snapshot).toMatchObject({
+      driver: "api",
+      windows: [{ label: "sensenova-6.7-flash-lite · Requests", usedPercent: 0.13333333333333333 }],
+    });
+    expect(
+      providerLimitSnapshotFromRateLimits({
+        provider: provider("sensenova-api", "api"),
+        rateLimits: { model: "sensenova-6.7-flash-lite" },
+        updatedAt: "2026-08-10T13:00:00.000Z",
+        source: "provider-api",
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves explicitly marked SenseNova local quota observations", () => {
+    const snapshot = providerLimitSnapshotFromRateLimits({
+      provider: provider("sensenova-api", "api"),
+      rateLimits: {
+        model: "sensenova-6.7-flash-lite",
+        telemetrySource: "local-observation",
+        "sensenova-quota-limit-requests": "1500",
+        "sensenova-quota-remaining-requests": "1498",
+        "sensenova-quota-reset-at": "2026-08-10T18:00:00.000Z",
+      },
+      updatedAt: "2026-08-10T13:00:00.000Z",
+      source: "provider-activity",
+    });
+    expect(snapshot).toMatchObject({
+      quality: "local-observation",
+      windows: [{ label: "sensenova-6.7-flash-lite · Requests", limit: 1500, remaining: 1498 }],
+    });
+  });
+
   it("normalizes a direct Codex account quota read as provider API telemetry", () => {
     const snapshot = providerLimitSnapshotFromRateLimits({
       provider: provider("codex", "codex"),

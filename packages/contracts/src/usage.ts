@@ -24,7 +24,13 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  */
 export const USAGE_CONTRACT_VERSION = 4 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex", "opencode", "commandcode"]);
+export const UsageProviderKind = Schema.Literals([
+  "claude",
+  "codex",
+  "opencode",
+  "commandcode",
+  "api",
+]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**

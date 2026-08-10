@@ -129,13 +129,27 @@ const mergeProviderModels = (
 export const mergeProviderSnapshot = (
   previousProvider: ServerProvider | undefined,
   nextProvider: ServerProvider,
-): ServerProvider =>
-  !previousProvider
-    ? nextProvider
-    : {
-        ...nextProvider,
-        models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
-      };
+): ServerProvider => {
+  if (!previousProvider) return nextProvider;
+  const nextApiCapabilities = nextProvider.apiCapabilities;
+  return {
+    ...nextProvider,
+    ...(nextProvider.driver === ProviderDriverKind.make("api") &&
+    nextProvider.status === "error" &&
+    previousProvider.apiCapabilities &&
+    nextApiCapabilities
+      ? {
+          apiCapabilities: Object.fromEntries(
+            Object.entries(nextApiCapabilities).map(([key, value]) => [
+              key,
+              { ...value, state: value.state === "unavailable" ? "unavailable" : "stale" },
+            ]),
+          ) as NonNullable<ServerProvider["apiCapabilities"]>,
+        }
+      : {}),
+    models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
+  };
+};
 
 export const mergeProviderSnapshots = (
   previousProviders: ReadonlyArray<ServerProvider>,

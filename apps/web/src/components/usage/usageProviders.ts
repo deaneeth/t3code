@@ -12,6 +12,7 @@ export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "claude",
   "opencode",
   "commandcode",
+  "api",
 ];
 
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
@@ -19,6 +20,7 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   commandcode: "CommandCode",
+  api: "API providers",
 };
 
 /** Claude's brand orange against a neutral white for Codex. */
@@ -27,6 +29,7 @@ export const PROVIDER_COLOR: Record<UsageProviderKind, string> = {
   codex: "#e6e6e6",
   opencode: "#4f46e5",
   commandcode: "#10b981",
+  api: "#a855f7",
 };
 
 /**
@@ -41,11 +44,13 @@ export const PROVIDER_MARK: Record<UsageProviderKind, Icon> = {
   codex: OpenAI,
   opencode: OpenCodeIcon,
   commandcode: CommandCodeIcon,
+  api: OpenAI,
 };
 
 export function toUsageProviderKind(driver: string): UsageProviderKind | null {
   if (driver === "claudeAgent" || driver === "claude") return "claude";
   if (driver === "codex" || driver === "opencode" || driver === "commandcode") return driver;
+  if (driver === "api") return "api";
   return null;
 }
 

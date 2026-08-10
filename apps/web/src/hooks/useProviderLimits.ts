@@ -45,7 +45,19 @@ function sanitizeSnapshot(value: unknown): ProviderLimitSnapshot | null {
         if (!label || usedPercent === null) return [];
         const resetsAtMs = item.resetsAtMs === null ? null : nonNegative(item.resetsAtMs);
         if (item.resetsAtMs !== null && resetsAtMs === null) return [];
-        return [{ label, usedPercent: Math.max(0, Math.min(100, usedPercent)), resetsAtMs }];
+        const limit = item.limit === undefined ? undefined : nonNegative(item.limit);
+        const remaining = item.remaining === undefined ? undefined : nonNegative(item.remaining);
+        if (item.limit !== undefined && limit === null) return [];
+        if (item.remaining !== undefined && remaining === null) return [];
+        return [
+          {
+            label,
+            usedPercent: Math.max(0, Math.min(100, usedPercent)),
+            resetsAtMs,
+            ...(limit !== undefined ? { limit } : {}),
+            ...(remaining !== undefined ? { remaining } : {}),
+          },
+        ];
       })
     : [];
 
@@ -98,6 +110,9 @@ function sanitizeSnapshot(value: unknown): ProviderLimitSnapshot | null {
     status,
     updatedAt,
     source: raw.source,
+    ...(raw.quality === "provider-reported" || raw.quality === "local-observation"
+      ? { quality: raw.quality }
+      : {}),
   } as unknown as ProviderLimitSnapshot;
 }
 

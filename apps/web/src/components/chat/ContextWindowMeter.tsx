@@ -239,6 +239,12 @@ function ProviderRateLimitSection(props: {
       {reportedAge ? (
         <div className="text-[10px] text-muted-foreground/50">Last reported {reportedAge}</div>
       ) : null}
+      {snapshot.quality === "local-observation" ? (
+        <div className="text-[10px] text-muted-foreground/50">
+          T3-observed from this server&apos;s API requests; account-wide dashboard usage is not
+          exposed by the API.
+        </div>
+      ) : null}
       {reachedReason && status === "rejected" ? (
         <div className="text-[11px] text-red-500/80">{reachedReason}</div>
       ) : null}
@@ -253,7 +259,11 @@ function ProviderRateLimitSection(props: {
           {windows.map((window, index) => (
             <ProviderRateLimitWindowBar
               key={`${window.label}-${index}`}
-              label={window.label}
+              label={
+                window.limit !== undefined && window.remaining !== undefined
+                  ? `${window.label} · ${window.limit - window.remaining}/${window.limit}`
+                  : window.label
+              }
               usedPercent={window.usedPercent}
               resetsIn={formatRateLimitResetsIn(window.resetsAt)}
               status={status}
@@ -326,7 +336,8 @@ export function ContextWindowMeter(props: {
   } = props;
   const isCommandCode = providerDriverKind === "commandcode";
   const isClaude = providerDriverKind === "claude" || providerDriverKind === "claudeAgent";
-  const isProviderWithRateLimits = providerDriverKind === "codex" || isClaude;
+  const isProviderWithRateLimits =
+    providerDriverKind === "codex" || isClaude || providerDriverKind === "api";
   const {
     data: commandCodeUsage,
     loading: commandCodeLoading,

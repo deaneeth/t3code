@@ -234,7 +234,7 @@ function ProviderPlanCard({
             ambiguous={commandCodeAmbiguous}
           />
         ) : (
-          <ProviderTelemetry limit={limit} />
+          <ProviderTelemetry limit={limit} provider={provider} />
         )}
       </CardPanel>
 
@@ -278,18 +278,30 @@ function ProviderPlanCard({
   );
 }
 
-function ProviderTelemetry({ limit }: { readonly limit: ProviderLimitSnapshot | null }) {
+function ProviderTelemetry({
+  limit,
+  provider,
+}: {
+  readonly limit: ProviderLimitSnapshot | null;
+  readonly provider: ServerProvider;
+}) {
   if (!limit || (limit.windows.length === 0 && !limit.credits && !limit.spendControl)) {
     return (
       <div className="border border-border/60 px-2.5 py-2 text-xs text-muted-foreground">
-        No provider-reported quota telemetry is available for this instance.
+        {provider.driver === "api"
+          ? "This API did not return quota headers. Dashboard-only plan balances and remaining calls are not exposed through the configured API."
+          : "No provider-reported quota telemetry is available for this instance."}
       </div>
     );
   }
   return (
     <div className="flex flex-col gap-3 border-t border-border/60 pt-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-foreground">Provider-reported limits</span>
+        <span className="text-xs font-medium text-foreground">
+          {limit.quality === "local-observation"
+            ? "T3-observed limits"
+            : "Provider-reported limits"}
+        </span>
         <span
           className={cn(
             "text-[11px]",
@@ -439,11 +451,15 @@ function ProviderTelemetryMessage({ children }: { readonly children: ReactNode }
 }
 
 function QuotaWindow({ window }: { readonly window: ProviderLimitSnapshot["windows"][number] }) {
+  const observed =
+    window.limit !== undefined && window.remaining !== undefined
+      ? `${window.limit - window.remaining} / ${window.limit} requests`
+      : null;
   return (
     <QuotaBar
       label={window.label}
       percentage={window.usedPercent}
-      detail={formatReset(window.resetsAtMs)}
+      detail={[observed, formatReset(window.resetsAtMs)].filter(Boolean).join(" · ")}
     />
   );
 }

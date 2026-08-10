@@ -741,6 +741,11 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    testApiProvider: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:test-api-provider",
+      tag: WS_METHODS.serverTestApiProvider,
+      concurrency: { mode: "latest", key: ({ environmentId }) => environmentId },
+    }),
     updateServer,
     upsertKeybinding: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:upsert-keybinding",

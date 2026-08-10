@@ -48,6 +48,33 @@ function aggregate(records: readonly UsageRecord[], timeZone = "UTC") {
 }
 
 describe("UsageAggregator", () => {
+  it("includes API-provider records without adding reasoning twice or inventing cost", () => {
+    const result = aggregate([
+      record({
+        provider: "api",
+        model: "unknown-api-model",
+        totals: {
+          uncachedInputTokens: 10,
+          cachedInputTokens: 5,
+          cacheCreationTokens: 0,
+          outputTokens: 7,
+          reasoningTokens: 3,
+        },
+        reportedCostUsd: null,
+        dedupeKey: "api:request-1",
+      }),
+    ]);
+    expect(result.buckets[0]?.provider).toBe("api");
+    expect(result.buckets[0]?.totals).toEqual({
+      uncachedInputTokens: 10,
+      cachedInputTokens: 5,
+      cacheCreationTokens: 0,
+      outputTokens: 7,
+      reasoningTokens: 3,
+    });
+    expect(result.buckets[0]?.costUsd).toBe(0);
+    expect(result.buckets[0]?.costSource).toBe("unpriced");
+  });
   it("keeps only the first record for a repeated dedupe key", () => {
     const result = aggregate([
       record({ dedupeKey: "msg_1:" }),

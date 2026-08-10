@@ -2,6 +2,7 @@ import { type CSSProperties, memo } from "react";
 import { type ProviderDriverKind } from "@t3tools/contracts";
 
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import { ClaudeAI, Gemini, GrokIcon, OpenAI, OpenCodeIcon } from "../Icons";
 import { cn } from "~/lib/utils";
 
 export function providerInstanceInitials(label: string): string {
@@ -26,7 +27,7 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   statusDotClassName?: string;
   indicatorBackground?: string;
 }) {
-  const Icon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
+  const Icon = resolveProviderIcon(props.driverKind, props.displayName);
   const indicatorBackground = props.indicatorBackground ?? "var(--card)";
   const accentStyle = props.accentColor
     ? ({ "--provider-accent": props.accentColor } as CSSProperties)
@@ -77,3 +78,15 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
     </span>
   );
 });
+
+function resolveProviderIcon(driverKind: ProviderDriverKind, displayName: string) {
+  const builtIn = PROVIDER_ICON_BY_PROVIDER[driverKind];
+  if (String(driverKind) !== "api") return builtIn ?? null;
+  const name = displayName.trim().toLowerCase();
+  if (name.includes("anthropic") || name.includes("claude")) return ClaudeAI;
+  if (name.includes("gemini") || name.includes("google")) return Gemini;
+  if (name.includes("xai") || name.includes("grok")) return GrokIcon;
+  if (name.includes("opencode")) return OpenCodeIcon;
+  if (name.includes("openai") || name.includes("chatgpt")) return OpenAI;
+  return null;
+}

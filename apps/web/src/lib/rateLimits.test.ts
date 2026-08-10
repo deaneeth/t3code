@@ -27,6 +27,59 @@ function makeActivity(
 }
 
 describe("extractLatestRateLimitSnapshot", () => {
+  it("extracts API request headers by model and leaves missing quota data unavailable", () => {
+    const result = extractLatestRateLimitSnapshot(
+      [
+        makeActivity({
+          payload: {
+            rateLimits: {
+              model: "sensenova-6.7-flash-lite",
+              "x-ratelimit-limit-requests": "1500",
+              "x-ratelimit-remaining-requests": "1498",
+            },
+          },
+        }),
+      ],
+      "api",
+    );
+    expect(result?.windows[0]).toMatchObject({
+      label: "sensenova-6.7-flash-lite · Requests",
+      usedPercent: 0.13333333333333333,
+    });
+    expect(
+      extractLatestRateLimitSnapshot(
+        [makeActivity({ payload: { rateLimits: { model: "sensenova-6.7-flash-lite" } } })],
+        "api",
+      ),
+    ).toBeNull();
+  });
+
+  it("renders SenseNova's explicitly marked local observation with absolute counts", () => {
+    const result = extractLatestRateLimitSnapshot(
+      [
+        makeActivity({
+          payload: {
+            rateLimits: {
+              model: "sensenova-6.7-flash-lite",
+              telemetrySource: "local-observation",
+              "sensenova-quota-limit-requests": "1500",
+              "sensenova-quota-remaining-requests": "1498",
+              "sensenova-quota-reset-at": "2026-08-10T18:00:00.000Z",
+            },
+          },
+        }),
+      ],
+      "api",
+    );
+    expect(result).toMatchObject({ quality: "local-observation" });
+    expect(result?.windows[0]).toMatchObject({
+      label: "sensenova-6.7-flash-lite · Requests",
+      limit: 1500,
+      remaining: 1498,
+      usedPercent: 0.13333333333333333,
+    });
+  });
+
   describe("Codex rate limits", () => {
     it("returns null for non-codex providers", () => {
       const activities = [

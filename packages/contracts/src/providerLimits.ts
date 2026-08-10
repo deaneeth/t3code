@@ -10,6 +10,8 @@ export const ProviderLimitWindow = Schema.Struct({
   label: TrimmedNonEmptyString,
   usedPercent: Schema.Number,
   resetsAtMs: Schema.NullOr(NonNegativeInt),
+  limit: Schema.optional(NonNegativeInt),
+  remaining: Schema.optional(NonNegativeInt),
 });
 export type ProviderLimitWindow = typeof ProviderLimitWindow.Type;
 
@@ -39,6 +41,7 @@ export const ProviderLimitSnapshot = Schema.Struct({
   status: Schema.NullOr(ProviderLimitStatus),
   updatedAt: IsoDateTime,
   source: Schema.Literals(["provider-activity", "provider-api"]),
+  quality: Schema.optional(Schema.Literals(["provider-reported", "local-observation"])),
 });
 export type ProviderLimitSnapshot = typeof ProviderLimitSnapshot.Type;
 

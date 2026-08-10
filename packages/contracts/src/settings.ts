@@ -10,6 +10,7 @@ import {
 } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import { ApiProviderProtocol } from "./apiProvider.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -516,6 +517,100 @@ export const CommandCodeSettings = makeProviderSettingsSchema(
 );
 export type CommandCodeSettings = typeof CommandCodeSettings.Type;
 
+/** Configuration for the native API-key provider driver. */
+export const ApiProviderSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    profileId: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("openai")),
+      Schema.annotateKey({
+        title: "API profile",
+        description: "Provider profile used for authentication, model discovery, and requests.",
+        providerSettingsForm: { hidden: true },
+      }),
+    ),
+    protocol: ApiProviderProtocol.pipe(
+      Schema.withDecodingDefault(Effect.succeed("openai-responses" as const)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    baseUrl: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Base URL",
+        description: "Optional endpoint override. Leave blank to use the selected profile default.",
+        providerSettingsForm: {
+          placeholder: "https://api.example.com",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    apiKeyHeader: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "API key header",
+        description:
+          "Optional override such as x-api-key. Enter 'none' for an endpoint that requires no API-key header.",
+        providerSettingsForm: { placeholder: "Authorization or x-api-key", clearWhenEmpty: "omit" },
+      }),
+    ),
+    apiKeyPrefix: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "API key prefix",
+        description: "Optional prefix added before the key, for example Bearer .",
+        providerSettingsForm: { placeholder: "Bearer ", clearWhenEmpty: "omit" },
+      }),
+    ),
+    apiKeyEnvironmentVariable: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("T3_API_KEY")),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    organization: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Organization",
+        description: "Optional provider organization, tenant, or account identifier.",
+        providerSettingsForm: { clearWhenEmpty: "omit" },
+      }),
+    ),
+    project: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Project",
+        description: "Optional provider project identifier.",
+        providerSettingsForm: { clearWhenEmpty: "omit" },
+      }),
+    ),
+    region: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Region",
+        description: "Optional provider region or location.",
+        providerSettingsForm: { clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: [
+      "profileId",
+      "baseUrl",
+      "apiKeyHeader",
+      "apiKeyPrefix",
+      "organization",
+      "project",
+      "region",
+    ],
+  },
+);
+export type ApiProviderSettings = typeof ApiProviderSettings.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -647,6 +742,7 @@ export const ServerSettings = Schema.Struct({
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     commandcode: CommandCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    api: ApiProviderSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -758,6 +854,20 @@ const CommandCodeSettingsPatch = Schema.Struct({
   addDirs: Schema.optionalKey(Schema.Array(TrimmedString)),
 });
 
+const ApiProviderSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  profileId: Schema.optionalKey(TrimmedString),
+  protocol: Schema.optionalKey(ApiProviderProtocol),
+  baseUrl: Schema.optionalKey(TrimmedString),
+  apiKeyHeader: Schema.optionalKey(TrimmedString),
+  apiKeyPrefix: Schema.optionalKey(TrimmedString),
+  apiKeyEnvironmentVariable: Schema.optionalKey(TrimmedString),
+  organization: Schema.optionalKey(TrimmedString),
+  project: Schema.optionalKey(TrimmedString),
+  region: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
@@ -799,6 +909,7 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       commandcode: Schema.optionalKey(CommandCodeSettingsPatch),
+      api: Schema.optionalKey(ApiProviderSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual
