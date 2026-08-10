@@ -69,6 +69,7 @@ export type {
   TransportResponse,
   TransportError,
   TransportUsage,
+  TransportAttachment,
   TransportHistoryEntry,
   TransportStreamEvent,
 } from "./LLMTransport.ts";

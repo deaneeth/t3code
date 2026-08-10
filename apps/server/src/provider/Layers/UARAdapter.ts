@@ -14,9 +14,13 @@ import { randomUUID } from "node:crypto";
 import {
   ProviderDriverKind,
   EventId,
+  ApprovalRequestId,
   ProviderSession,
   RuntimeItemId,
+  RuntimeRequestId,
+  type ProviderApprovalDecision,
   type ProviderRuntimeEvent,
+  type ProviderUserInputAnswers,
   ThreadId,
   TurnId,
   type ProviderSendTurnInput,
@@ -35,6 +39,7 @@ import type { ProviderAdapterShape, ProviderThreadSnapshot } from "../Services/P
 import {
   createTransportFromUrl,
   type LLMTransport,
+  type TransportAttachment,
   type TransportHistoryEntry,
 } from "../../agentRuntime/transport/index.ts";
 import { runAgentLoop, type AgentLoopConfig } from "../../agentRuntime/AgentLoop.ts";
@@ -44,6 +49,7 @@ import { ContextEngine } from "../../agentRuntime/ContextEngine.ts";
 import { RuntimeEventEmitter, createEvent } from "../../agentRuntime/RuntimeEvents.ts";
 import { TelemetryCollector } from "../../agentRuntime/Telemetry.ts";
 import { wrapMCPTools, type MCPToolDefinition } from "../../agentRuntime/MCPManager.ts";
+import type { ApiProviderUsageLedger } from "../../usage/ApiProviderUsageLedger.ts";
 
 const PROVIDER = ProviderDriverKind.make("api");
 
@@ -63,6 +69,9 @@ interface UARSession {
   readonly contextEngine: ContextEngine;
   readonly eventEmitter: RuntimeEventEmitter;
   readonly telemetry: TelemetryCollector;
+  readonly pendingApprovals: Map<string, (decision: ProviderApprovalDecision) => void>;
+  readonly pendingUserInputs: Map<string, (answers: ProviderUserInputAnswers) => void>;
+  readonly approvedTools: Set<string>;
   activeTurn?: { readonly turnId: TurnId; readonly controller: AbortController } | undefined;
 }
 
@@ -71,12 +80,23 @@ interface UARAdapterConfig {
   readonly baseUrl?: string | undefined;
   /** API key forwarded to the configured endpoint. */
   readonly apiKey?: string | undefined;
+  /** Fully formed provider authentication headers. Takes precedence over apiKey. */
+  readonly headers?: Readonly<Record<string, string>> | undefined;
+  /** Provider instance id copied onto emitted runtime events. */
+  readonly providerInstanceId?: ProviderSessionStartInput["providerInstanceId"];
+  /** Resolve a stored chat attachment into transport-ready bytes. */
+  readonly resolveAttachment?: (input: {
+    readonly attachment: NonNullable<ProviderSendTurnInput["attachments"]>[number];
+  }) => Promise<TransportAttachment | undefined>;
   /** Additional MCP tools to include. */
   readonly mcpTools?: ReadonlyArray<MCPToolDefinition> | undefined;
   /** Custom tools to include beyond the canonical set. */
   readonly extraTools?: ReadonlyArray<AgentTool> | undefined;
   /** Agent loop configuration. */
   readonly loopConfig?: Partial<AgentLoopConfig> | undefined;
+  /** Durable usage ledger shared by API-provider adapters. */
+  readonly usageLedger?: ApiProviderUsageLedger["Service"] | undefined;
+  readonly profileId?: string | undefined;
   /** System prompt to prepend. */
   readonly systemPrompt?: string | undefined;
 }
@@ -120,27 +140,177 @@ export function createUARAdapter(
   const baseEvent = (threadId: ThreadId, turnId?: TurnId) => ({
     eventId: EventId.make(`uar_${randomUUID()}`),
     provider: PROVIDER,
+    ...(cfg.providerInstanceId ? { providerInstanceId: cfg.providerInstanceId } : {}),
     threadId,
     createdAt: new Date().toISOString(),
     ...(turnId ? { turnId } : {}),
   });
 
+  const requestTypeForTool = (toolName: string) =>
+    toolName === "run_command"
+      ? "command_execution_approval"
+      : toolName === "read_file"
+        ? "file_read_approval"
+        : toolName === "write_file"
+          ? "file_change_approval"
+          : "dynamic_tool_call";
+
+  const requestApproval = async (
+    session: UARSession,
+    toolName: string,
+    detail: string,
+    args: Record<string, unknown>,
+  ): Promise<ProviderApprovalDecision> => {
+    if (session.runtimeMode !== "approval-required" || session.approvedTools.has(toolName)) {
+      return "accept";
+    }
+    const turnId = session.activeTurn?.turnId;
+    if (!turnId) return "cancel";
+    const requestId = ApprovalRequestId.make(`uar-${turnId}-${randomUUID()}`);
+    const key = String(requestId);
+    const decision = await new Promise<ProviderApprovalDecision>((resolve) => {
+      session.pendingApprovals.set(key, resolve);
+      enqueue({
+        ...baseEvent(session.threadId, turnId),
+        requestId: RuntimeRequestId.make(requestId),
+        type: "request.opened",
+        payload: {
+          requestType: requestTypeForTool(toolName),
+          detail,
+          args: { toolName, ...args },
+        },
+      });
+      session.activeTurn?.controller.signal.addEventListener("abort", () => resolve("cancel"), {
+        once: true,
+      });
+    });
+    session.pendingApprovals.delete(key);
+    if (decision === "acceptForSession") session.approvedTools.add(toolName);
+    enqueue({
+      ...baseEvent(session.threadId, turnId),
+      requestId: RuntimeRequestId.make(requestId),
+      type: "request.resolved",
+      payload: { requestType: requestTypeForTool(toolName), decision },
+    });
+    return decision;
+  };
+
+  const requestUserInput = async (
+    session: UARSession,
+    args: Record<string, unknown>,
+  ): Promise<{ readonly output: string; readonly success: boolean }> => {
+    const questions = Array.isArray(args.questions)
+      ? args.questions.filter(
+          (question): question is Record<string, unknown> =>
+            Boolean(question) && typeof question === "object" && !Array.isArray(question),
+        )
+      : [];
+    const normalizedQuestions = questions.flatMap((question) => {
+      const id = typeof question.id === "string" ? question.id.trim() : "";
+      const header = typeof question.header === "string" ? question.header.trim() : "";
+      const prompt = typeof question.question === "string" ? question.question.trim() : "";
+      const options = Array.isArray(question.options)
+        ? question.options.flatMap((option) => {
+            if (!option || typeof option !== "object" || Array.isArray(option)) return [];
+            const value = option as Record<string, unknown>;
+            const label = typeof value.label === "string" ? value.label.trim() : "";
+            const description =
+              typeof value.description === "string" ? value.description.trim() : "";
+            return label && description ? [{ label, description }] : [];
+          })
+        : [];
+      if (!id || !header || !prompt || options.length === 0) return [];
+      return [
+        {
+          id,
+          header,
+          question: prompt,
+          options,
+          ...(typeof question.multiSelect === "boolean"
+            ? { multiSelect: question.multiSelect }
+            : {}),
+        },
+      ];
+    });
+    if (normalizedQuestions.length === 0) {
+      return { output: "User questions were invalid or empty.", success: false };
+    }
+    const turnId = session.activeTurn?.turnId;
+    if (!turnId) return { output: "User input request has no active turn.", success: false };
+    const requestId = ApprovalRequestId.make(`uar-user-${turnId}-${randomUUID()}`);
+    const key = String(requestId);
+    const answers = await new Promise<ProviderUserInputAnswers>((resolve) => {
+      session.pendingUserInputs.set(key, resolve);
+      enqueue({
+        ...baseEvent(session.threadId, turnId),
+        requestId: RuntimeRequestId.make(requestId),
+        type: "user-input.requested",
+        payload: { questions: normalizedQuestions },
+      });
+      session.activeTurn?.controller.signal.addEventListener("abort", () => resolve({}), {
+        once: true,
+      });
+    });
+    session.pendingUserInputs.delete(key);
+    enqueue({
+      ...baseEvent(session.threadId, turnId),
+      requestId: RuntimeRequestId.make(requestId),
+      type: "user-input.resolved",
+      payload: { answers },
+    });
+    return { output: JSON.stringify(answers), success: true };
+  };
+
   const buildTools = (session: UARSession): AgentTool[] => {
     const tools: AgentTool[] = [...canonicalTools];
     if (cfg.extraTools) tools.push(...cfg.extraTools);
     if (cfg.mcpTools && cfg.mcpTools.length > 0) tools.push(...wrapMCPTools(cfg.mcpTools));
-    return tools.filter((tool) => {
-      const readOnly = tool.risk === "read";
-      const runtimeAllows =
-        session.runtimeMode === "auto" ||
-        session.runtimeMode === "full-access" ||
-        (session.runtimeMode === "auto-accept-edits" && (readOnly || tool.risk === "write"));
-      const approvalAllows = session.approvalPolicy === "never" || readOnly;
-      const sandboxAllows =
-        session.sandboxMode === "danger-full-access" ||
-        (session.sandboxMode === "workspace-write" && (readOnly || tool.risk === "write"));
-      return runtimeAllows && approvalAllows && sandboxAllows;
-    });
+    return tools
+      .filter((tool) => {
+        const readOnly = tool.risk === "read";
+        const runtimeAllows =
+          session.runtimeMode === "approval-required" ||
+          session.runtimeMode === "auto" ||
+          session.runtimeMode === "full-access" ||
+          (session.runtimeMode === "auto-accept-edits" && (readOnly || tool.risk === "write"));
+        const sandboxAllows =
+          session.sandboxMode === "danger-full-access" ||
+          (session.sandboxMode === "workspace-write" && (readOnly || tool.risk === "write"));
+        return runtimeAllows && sandboxAllows;
+      })
+      .map((tool) => {
+        if (tool.id === "ask_user") {
+          return {
+            ...tool,
+            execute: async (args: Record<string, unknown>) => requestUserInput(session, args),
+          };
+        }
+        return {
+          ...tool,
+          execute: async (args: Record<string, unknown>, context: AgentToolContext) => {
+            const normalizedArgs = { ...args };
+            if (
+              (tool.id === "read_file" || tool.id === "write_file") &&
+              typeof normalizedArgs.absoluteFilePath !== "string" &&
+              typeof normalizedArgs.path === "string"
+            ) {
+              const { resolve } = await import("node:path");
+              normalizedArgs.absoluteFilePath = resolve(session.cwd, normalizedArgs.path);
+            }
+            const detail =
+              typeof normalizedArgs.command === "string"
+                ? normalizedArgs.command
+                : typeof normalizedArgs.absoluteFilePath === "string"
+                  ? normalizedArgs.absoluteFilePath
+                  : tool.id;
+            const decision = await requestApproval(session, tool.id, detail, normalizedArgs);
+            if (decision === "decline" || decision === "cancel") {
+              return { output: "Tool execution was declined by the user.", success: false };
+            }
+            return tool.execute(normalizedArgs, context);
+          },
+        };
+      });
   };
 
   const buildToolContext = (projectRoot: string): AgentToolContext => {
@@ -243,8 +413,8 @@ export function createUARAdapter(
         const model = input.modelSelection?.model ?? "gpt-4o";
         sessions.get(threadId)?.activeTurn?.controller.abort();
         const baseUrl = (cfg.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/u, "");
-        const headers: Record<string, string> = {};
-        if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`;
+        const headers: Readonly<Record<string, string>> =
+          cfg.headers ?? (cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {});
 
         const transport = createTransportFromUrl(baseUrl);
         const sessionId = `session_${randomUUID()}`;
@@ -256,7 +426,7 @@ export function createUARAdapter(
           sandboxMode: input.sandboxMode ?? "danger-full-access",
           approvalPolicy: input.approvalPolicy ?? "never",
           createdAt: new Date().toISOString(),
-          providerInstanceId: input.providerInstanceId,
+          providerInstanceId: input.providerInstanceId ?? cfg.providerInstanceId,
           transport,
           model,
           baseUrl,
@@ -265,6 +435,9 @@ export function createUARAdapter(
           contextEngine: new ContextEngine(),
           eventEmitter: new RuntimeEventEmitter(),
           telemetry: new TelemetryCollector(sessionId),
+          pendingApprovals: new Map(),
+          pendingUserInputs: new Map(),
+          approvedTools: new Set(),
         };
 
         sessions.set(threadId, session);
@@ -313,20 +486,44 @@ export function createUARAdapter(
         const allTools = buildTools(session);
         const systemPrompt = cfg.systemPrompt;
 
-        if (input.attachments && input.attachments.length > 0) {
+        const text = input.input?.trim() ?? "";
+        if (!text && (input.attachments?.length ?? 0) === 0) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
             operation: "sendTurn",
-            issue:
-              "Image attachments require an attachment resolver and are not supported by this adapter yet.",
+            issue: "API turns require text or an image attachment.",
           });
         }
         if (input.modelSelection?.model) session.model = input.modelSelection.model;
 
+        const attachments: TransportAttachment[] = [];
+        const resolveAttachment = cfg.resolveAttachment;
+        for (const attachment of input.attachments ?? []) {
+          const resolved = resolveAttachment
+            ? yield* Effect.tryPromise({
+                try: () => resolveAttachment({ attachment }),
+                catch: (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "sendTurn",
+                    detail: "Failed to resolve API image attachment.",
+                    cause,
+                  }),
+              })
+            : undefined;
+          if (!resolved) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: `Invalid or unsupported attachment '${attachment.id}'.`,
+            });
+          }
+          attachments.push(resolved);
+        }
+
         // Build history with context engine
         const historyResult = session.contextEngine.buildHistory(systemPrompt);
         const history = [...historyResult.history];
-        const text = input.input ?? "";
         const turnId = TurnId.make(`turn_${randomUUID()}`);
         const controller = new AbortController();
         const toolItemIds = new Map<string, RuntimeItemId>();
@@ -350,6 +547,7 @@ export function createUARAdapter(
               model: session.model,
               baseUrl: session.baseUrl,
               headers: session.headers,
+              ...(attachments.length > 0 ? { attachments } : {}),
               config: { ...cfg.loopConfig, signal: controller.signal },
               onEvent: (event) => {
                 const eventId = session.telemetry.getMetrics().sessionId;
@@ -411,6 +609,9 @@ export function createUARAdapter(
                       itemType: "dynamic_tool_call",
                       status: event.success === false ? "failed" : "completed",
                       title: event.toolName ?? "Tool",
+                      ...(event.success === false && event.error?.trim()
+                        ? { detail: event.error.trim().slice(0, 4_000) }
+                        : {}),
                     },
                   });
                 }
@@ -431,17 +632,56 @@ export function createUARAdapter(
           ),
         );
         // Update session state
-        session.contextEngine.recordTurn(
-          [
-            { role: "user", content: text },
-            { role: "assistant", content: result.text || undefined },
-          ],
-          result.usage,
-        );
-        session.history.push(
-          { role: "user", content: text },
-          { role: "assistant", content: result.text || undefined },
-        );
+        const newHistory = result.history.slice(history.length);
+        session.contextEngine.recordTurn(newHistory, result.usage);
+        session.history.push(...newHistory);
+
+        const inputTokens = result.usage?.inputTokens ?? 0;
+        const cachedInputTokens = result.usage?.cachedInputTokens ?? 0;
+        const outputTokens = result.usage?.outputTokens ?? 0;
+        const reasoningOutputTokens = result.usage?.reasoningOutputTokens ?? 0;
+        const usedTokens = inputTokens + outputTokens + reasoningOutputTokens;
+        if (usedTokens > 0) {
+          if (cfg.usageLedger && cfg.profileId && cfg.providerInstanceId) {
+            yield* cfg.usageLedger.append({
+              providerInstanceId: cfg.providerInstanceId,
+              profileId: cfg.profileId,
+              threadId: input.threadId,
+              turnId,
+              model: session.model,
+              requestId: `uar:${String(cfg.providerInstanceId)}:${String(turnId)}`,
+              ...(inputTokens > 0 ? { inputTokens } : {}),
+              ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+              ...(outputTokens > 0 ? { outputTokens } : {}),
+              ...(reasoningOutputTokens > 0 ? { reasoningOutputTokens } : {}),
+              costSource: "unavailable",
+              recordedAt: new Date().toISOString(),
+            });
+          }
+          const usageStats = session.contextEngine.getMemory().usageStats;
+          enqueue({
+            ...baseEvent(input.threadId, turnId),
+            type: "thread.token-usage.updated",
+            payload: {
+              usage: {
+                usedTokens,
+                totalProcessedTokens: usageStats.totalInputTokens + usageStats.totalOutputTokens,
+                ...(inputTokens > 0 ? { inputTokens } : {}),
+                ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+                ...(outputTokens > 0 ? { outputTokens } : {}),
+                ...(reasoningOutputTokens > 0 ? { reasoningOutputTokens } : {}),
+                lastUsedTokens: usedTokens,
+                ...(inputTokens > 0 ? { lastInputTokens: inputTokens } : {}),
+                ...(cachedInputTokens > 0 ? { lastCachedInputTokens: cachedInputTokens } : {}),
+                ...(outputTokens > 0 ? { lastOutputTokens: outputTokens } : {}),
+                ...(reasoningOutputTokens > 0
+                  ? { lastReasoningOutputTokens: reasoningOutputTokens }
+                  : {}),
+                toolUses: result.toolCalls.length,
+              },
+            },
+          });
+        }
 
         // Emit completion event
         session.eventEmitter.emit(
@@ -462,7 +702,11 @@ export function createUARAdapter(
         enqueue({
           ...baseEvent(input.threadId, turnId),
           type: "turn.completed",
-          payload: { state: stopState, stopReason: result.stopReason },
+          payload: {
+            state: stopState,
+            stopReason: result.stopReason,
+            ...(result.usage ? { usage: result.usage } : {}),
+          },
         });
 
         return { threadId: input.threadId, turnId };
@@ -483,29 +727,43 @@ export function createUARAdapter(
         }
       }),
 
-    respondToRequest: (threadId, _requestId, _decision) =>
-      Effect.fail(
-        new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "respondToRequest",
-          detail: `Interactive approvals are not supported by the universal adapter for thread ${threadId}.`,
-        }),
-      ),
+    respondToRequest: (threadId, requestId, decision) =>
+      Effect.gen(function* () {
+        const session = sessions.get(threadId);
+        const resolve = session?.pendingApprovals.get(String(requestId));
+        if (!resolve) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "respondToRequest",
+            issue: "Approval request is no longer pending.",
+          });
+        }
+        resolve(decision);
+      }),
 
-    respondToUserInput: (threadId, _requestId, _answers) =>
-      Effect.fail(
-        new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "respondToUserInput",
-          detail: `Interactive user input is not supported by the universal adapter for thread ${threadId}.`,
-        }),
-      ),
+    respondToUserInput: (threadId, requestId, answers) =>
+      Effect.gen(function* () {
+        const session = sessions.get(threadId);
+        const resolve = session?.pendingUserInputs.get(String(requestId));
+        if (!resolve) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "respondToUserInput",
+            issue: "User-input request is no longer pending.",
+          });
+        }
+        resolve(answers);
+      }),
 
     stopSession: (threadId: ThreadId) =>
       Effect.sync(() => {
         const session = sessions.get(threadId);
         if (session) {
           session.activeTurn?.controller.abort();
+          for (const resolve of session.pendingApprovals.values()) resolve("cancel");
+          for (const resolve of session.pendingUserInputs.values()) resolve({});
+          session.pendingApprovals.clear();
+          session.pendingUserInputs.clear();
           session.telemetry.markEnded();
           sessions.delete(threadId);
         }
@@ -570,6 +828,8 @@ export function createUARAdapter(
     stopAll: () =>
       Effect.sync(() => {
         for (const [, session] of sessions) {
+          for (const resolve of session.pendingApprovals.values()) resolve("cancel");
+          for (const resolve of session.pendingUserInputs.values()) resolve({});
           session.telemetry.markEnded();
         }
         sessions.clear();

@@ -25,6 +25,7 @@ import type {
   TransportToolCall,
   TransportUsage,
   TransportHistoryEntry,
+  TransportAttachment,
 } from "./transport/LLMTransport.ts";
 
 export interface AgentLoopResult {
@@ -58,6 +59,8 @@ export type AgentLoopEventCallback = (event: {
   readonly toolName?: string | undefined;
   readonly toolId?: string | undefined;
   readonly success?: boolean | undefined;
+  /** Failure detail for runtime surfaces; successful tool output stays private to the model loop. */
+  readonly error?: string | undefined;
   readonly usage?: TransportUsage | undefined;
   readonly round?: number | undefined;
   readonly attempt?: number | undefined;
@@ -72,10 +75,11 @@ export async function runAgentLoop(input: {
   readonly model: string;
   readonly baseUrl: string;
   readonly headers: Readonly<Record<string, string>>;
+  readonly attachments?: ReadonlyArray<TransportAttachment> | undefined;
   readonly config?: AgentLoopConfig | undefined;
   readonly onEvent?: AgentLoopEventCallback | undefined;
 }): Promise<AgentLoopResult> {
-  const { transport, tools, toolContext, text, model, baseUrl, headers } = input;
+  const { transport, tools, toolContext, text, model, baseUrl, headers, attachments } = input;
   const config = input.config ?? {};
   const maxRounds = Math.max(0, Math.floor(config.maxRounds ?? 12));
   const maxRetries = Math.max(0, Math.floor(config.maxRetries ?? 2));
@@ -98,8 +102,22 @@ export async function runAgentLoop(input: {
     },
   }));
 
-  if (text.trim() !== "") {
-    history.push({ role: "user", content: text });
+  if (text.trim() !== "" || (attachments?.length ?? 0) > 0) {
+    history.push({
+      role: "user",
+      content:
+        attachments && attachments.length > 0
+          ? [
+              ...(text.trim() !== "" ? [{ type: "text", text }] : []),
+              ...attachments.map((attachment) => ({
+                type: "image_url",
+                image_url: {
+                  url: `data:${attachment.mimeType};base64,${attachment.data}`,
+                },
+              })),
+            ]
+          : text,
+    });
   }
 
   let lastAssistantText = "";
@@ -112,13 +130,15 @@ export async function runAgentLoop(input: {
 
     input.onEvent?.({ kind: "round", round: round + 1 });
 
+    const initialAttachments = round === 0 && attachments && attachments.length > 0;
     const request: TransportRequest = {
       model,
-      text: "",
-      history,
+      text: initialAttachments ? text : "",
+      history: initialAttachments ? history.slice(0, -1) : history,
       tools: toolSchemas,
       stream: config.stream ?? true,
       options: config.options,
+      ...(initialAttachments ? { attachments } : {}),
     };
 
     const plan = transport.buildRequest({ request, baseUrl, headers });
@@ -360,6 +380,13 @@ export async function runAgentLoop(input: {
       }
     }
 
+    // Providers occasionally emit an empty placeholder tool call while
+    // streaming. Do not surface it as a real tool invocation: it creates a
+    // misleading failed tool item and can poison the next model round.
+    toolCalls = toolCalls.filter(
+      (call) => call.id.trim().length > 0 && call.name.trim().length > 0,
+    );
+
     // Accumulate usage
     if (usage) {
       totalUsage = {
@@ -420,6 +447,7 @@ export async function runAgentLoop(input: {
           toolName: call.name,
           toolId: call.id,
           success: result.success,
+          ...(result.success ? {} : { error: result.output }),
         });
         return { id: call.id, result };
       }),
@@ -439,6 +467,7 @@ export async function runAgentLoop(input: {
         toolName: call.name,
         toolId: call.id,
         success: result.success,
+        ...(result.success ? {} : { error: result.output }),
       });
       resultMap.set(call.id, result);
     }
@@ -554,12 +583,17 @@ function applyStreamEvent(
     const knownId = index === undefined ? undefined : toolCallIdsByIndex.get(index);
     const knownItemId =
       event.toolItemId === undefined ? undefined : toolCallIdsByItemId.get(event.toolItemId);
-    const id = event.toolCallId ?? knownItemId ?? knownId ?? `tool-${index ?? nextIndex()}`;
+    // Some OpenAI-compatible streams (including SenseNova) repeat tool-call
+    // chunks with empty IDs/names. Treat those as omitted so they merge into
+    // the call established by the first non-empty chunk.
+    const eventId = event.toolCallId?.trim() || undefined;
+    const eventName = event.toolName?.trim() || undefined;
+    const id = eventId ?? knownItemId ?? knownId ?? `tool-${index ?? nextIndex()}`;
     if (index !== undefined) toolCallIdsByIndex.set(index, id);
     if (event.toolItemId !== undefined) toolCallIdsByItemId.set(event.toolItemId, id);
     const existing = toolCallsMap.get(id) ?? { name: "", args: "" };
     toolCallsMap.set(id, {
-      name: event.toolName ?? existing.name,
+      name: eventName ?? existing.name,
       args: existing.args + (event.toolArgumentsJson ?? event.toolArgumentsDelta ?? ""),
     });
   }

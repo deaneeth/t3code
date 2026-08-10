@@ -191,6 +191,16 @@ function fakeTransport(responseCount: { value: number }): LLMTransport {
           },
         ];
       }
+      if (block.includes('"blank"')) {
+        return [
+          {
+            kind: "tool-call",
+            toolCallIndex: 0,
+            toolCallId: "",
+            toolName: "",
+          },
+        ];
+      }
       return block.includes("[DONE]") ? [{ kind: "done" }] : [];
     },
     normalizeError: (body, status) => ({ message: `${status}:${body}`, retryable: false }),
@@ -231,6 +241,38 @@ describe("agent loop transport boundaries", () => {
     expect(result.text).toBe("finished");
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls[0]?.id).toBe("call-1");
+  });
+
+  it("merges empty SenseNova tool chunks into the established call", async () => {
+    const responseCount = { value: 0 };
+    globalThis.fetch = (async () => {
+      responseCount.value += 1;
+      if (responseCount.value === 1) {
+        return new Response(
+          'data: {"start":true}\n\ndata: {"blank":true}\n\ndata: {"delta":true}\n\ndata: [DONE]\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(JSON.stringify({ text: "finished" }), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const result = await runAgentLoop({
+      transport: fakeTransport(responseCount),
+      tools: [readFileTool],
+      toolContext: memoryContext({ "/project/demo.txt": "contents" }),
+      text: "read it",
+      model: "test",
+      baseUrl: "https://example.test",
+      headers: {},
+    });
+
+    expect(result.stopReason).toBe("completed");
+    expect(result.text).toBe("finished");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0]?.id).toBe("call-1");
+    expect(result.toolCalls[0]?.result).toContain("contents");
   });
 
   it("reports max-rounds and malformed JSON instead of claiming completion", async () => {

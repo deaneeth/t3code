@@ -33,7 +33,14 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { normalizeApiProviderSettings } from "../apiProviderProfiles.ts";
+import {
+  API_PROVIDER_PROFILE_BY_ID,
+  buildApiProviderAuthHeaders,
+  normalizeApiProviderSettings,
+} from "../apiProviderProfiles.ts";
+import { resolveApiBaseUrl } from "../apiProviderTransport.ts";
+import { createUARAdapter } from "../Layers/UARAdapter.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("api");
 const decodeSettings = Schema.decodeSync(ApiProviderSettings);
@@ -99,17 +106,41 @@ export const ApiProviderDriver: ProviderDriver<ApiProviderSettings, ApiProviderD
         continuationKey: continuationIdentity.continuationKey,
       });
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE);
-      const adapter = yield* makeApiProviderAdapter({
-        instanceId,
-        settings,
-        apiKey,
-        httpClient,
-        fileSystem,
-        childProcessSpawner,
-        path,
-        attachmentsDir: serverConfig.attachmentsDir,
-        ...(usageLedger._tag === "Some" ? { usageLedger: usageLedger.value } : {}),
-      }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+      const profile = API_PROVIDER_PROFILE_BY_ID.get(settings.profileId as never);
+      const useUniversalRuntime =
+        settings.protocol === "openai-chat-completions" && settings.profileId === "sensenova";
+      const adapter = useUniversalRuntime
+        ? createUARAdapter({
+            baseUrl: resolveApiBaseUrl({
+              defaultBaseUrl: profile?.defaultBaseUrl ?? "https://api.openai.com/v1",
+              override: settings.baseUrl,
+            }),
+            headers: buildApiProviderAuthHeaders({ settings, profile: profile!, apiKey }),
+            providerInstanceId: instanceId,
+            ...(usageLedger._tag === "Some" ? { usageLedger: usageLedger.value } : {}),
+            profileId: String(settings.profileId),
+            resolveAttachment: async ({ attachment }) => {
+              const attachmentPath = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              });
+              if (!attachmentPath) return undefined;
+              const bytes = await fileSystem.readFile(attachmentPath).pipe(Effect.runPromise);
+              if (bytes.byteLength > 10 * 1024 * 1024) return undefined;
+              return { mimeType: attachment.mimeType, data: Buffer.from(bytes).toString("base64") };
+            },
+          })
+        : yield* makeApiProviderAdapter({
+            instanceId,
+            settings,
+            apiKey,
+            httpClient,
+            fileSystem,
+            childProcessSpawner,
+            path,
+            attachmentsDir: serverConfig.attachmentsDir,
+            ...(usageLedger._tag === "Some" ? { usageLedger: usageLedger.value } : {}),
+          }).pipe(Effect.provideService(Crypto.Crypto, crypto));
       const textGeneration = yield* makeApiProviderTextGeneration(settings, apiKey, httpClient);
       const snapshotSettings = makeProviderSnapshotSettingsSource(settings, serverSettings);
       const snapshot = yield* makeManagedServerProvider<
