@@ -176,37 +176,43 @@ export function useThreadComposerState() {
           updateComposerDraftSettings(threadKey, { interactionMode: command });
           return true;
         case "stop":
-          void interruptTurnCommand({ environmentId, threadId }).catch(() => undefined);
+          void interruptTurnCommand({ environmentId, input: { threadId } }).catch(() => undefined);
           return true;
         case "snooze": {
           const snoozedUntil = parseSlashSnoozeDuration(args);
           if (snoozedUntil === null) {
             Alert.alert("Snooze", 'Give a duration like "/snooze 30m" or "/snooze 2h".');
           } else {
-            void snoozeCommand({ environmentId, threadId, snoozedUntil }).catch(() => undefined);
+            void snoozeCommand({ environmentId, input: { threadId, snoozedUntil } }).catch(
+              () => undefined,
+            );
           }
           return true;
         }
         case "unsnooze":
-          void unsnoozeCommand({ environmentId, threadId }).catch(() => undefined);
+          void unsnoozeCommand({ environmentId, input: { threadId, reason: "user" } }).catch(
+            () => undefined,
+          );
           return true;
         case "archive":
-          void archiveCommand({ environmentId, threadId }).catch(() => undefined);
+          void archiveCommand({ environmentId, input: { threadId } }).catch(() => undefined);
           return true;
         case "unarchive":
-          void unarchiveCommand({ environmentId, threadId }).catch(() => undefined);
+          void unarchiveCommand({ environmentId, input: { threadId } }).catch(() => undefined);
           return true;
         case "pin":
-          void pinCommand({ environmentId, threadId }).catch(() => undefined);
+          void pinCommand({ environmentId, input: { threadId } }).catch(() => undefined);
           return true;
         case "unpin":
-          void unpinCommand({ environmentId, threadId }).catch(() => undefined);
+          void unpinCommand({ environmentId, input: { threadId } }).catch(() => undefined);
           return true;
         case "settle":
-          void settleCommand({ environmentId, threadId }).catch(() => undefined);
+          void settleCommand({ environmentId, input: { threadId } }).catch(() => undefined);
           return true;
         case "unsettle":
-          void unsettleCommand({ environmentId, threadId }).catch(() => undefined);
+          void unsettleCommand({ environmentId, input: { threadId, reason: "user" } }).catch(
+            () => undefined,
+          );
           return true;
         case "rename": {
           const title = args.trim();
@@ -214,7 +220,9 @@ export function useThreadComposerState() {
             Alert.alert("Rename thread", 'Give it a name, like "/rename bug hunt".');
             return true;
           }
-          void updateMetadataCommand({ environmentId, threadId, title }).catch(() => undefined);
+          void updateMetadataCommand({ environmentId, input: { threadId, title } }).catch(
+            () => undefined,
+          );
           return true;
         }
         case "help":
