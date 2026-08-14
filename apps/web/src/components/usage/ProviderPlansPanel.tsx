@@ -43,7 +43,16 @@ export function ProviderPlansPanel({ refreshSignal = 0 }: { readonly refreshSign
           environments.find((environment) => environment.environmentId === environmentId)?.label ??
           config.environment.label;
         return config.providers
-          .filter((provider) => provider.enabled && provider.availability !== "unavailable")
+          .filter((provider) => {
+            if (provider.availability === "unavailable") return false;
+            if (!provider.enabled) return false;
+            // Only providers the user explicitly added or toggled on in
+            // Settings → Providers. The server reports every built-in slot as
+            // enabled by default, but only instances that exist in
+            // `providerInstances` reflect an explicit user choice.
+            const instance = config.settings.providerInstances[provider.instanceId];
+            return instance !== undefined && instance.enabled !== false;
+          })
           .map((provider) => ({ environmentId, environmentLabel, provider }));
       }),
     [environments, serverConfigs],
